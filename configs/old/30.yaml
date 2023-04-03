@@ -1,0 +1,16 @@
+name: 'binary gender classifier'
+inferencer: 'ai_old.inf.classifier.BinaryClassifier'
+
+dataset:
+    type: 'rgb'
+    name: 'itw-128'
+    size: 128
+
+model:
+    c:
+        type: 'ai_old.models.c.gender.TransferGenderClassifier'
+        dims_out: 1
+        hidden: [128, 32, 8]
+
+inf:
+    batch_size: 32

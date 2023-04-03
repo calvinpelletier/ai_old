@@ -1,0 +1,2 @@
+comparison_metric: 'cross_entropy'
+base_image_columns: ['e4e_inv_128']

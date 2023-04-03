@@ -1,0 +1,33 @@
+info: '256x256 style autoencoder'
+task: 'ai_old.task.rec.RecTask'
+seed: 0
+fp32: false
+n_steps: 25000000
+# eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.Ffhq256GanDataset'
+    imsize: 256
+    batch_size: 16
+    batch_gpu: 'auto'
+    xflip: true
+
+trainer:
+    type: 'ai_old.trainer.rec.RecTrainer'
+
+opt:
+    type: 'adam'
+    hparams: 'auto-sg2'
+    sch: 'flat'
+
+model:
+    type: 'ai_old.nn.models.ae.style.StyleAutoencoder'
+    nc_base: 32
+
+loss:
+    type: 'ai_old.loss.rec.CustomRecLoss'
+    face:
+        weight: 0.1
+    perceptual:
+        type: 'lpips_alex'
+        weight: 0.8

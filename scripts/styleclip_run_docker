@@ -1,0 +1,12 @@
+docker run -u $(id -u):$(id -g) --gpus=all -it --shm-size=32g \
+    -v $ASI_DATASETS:/home/asiu/datasets \
+    -v $ASI_DATA:/home/asiu/data \
+    -v $HOME/.cache/torch:/home/asiu/.cache/torch \
+    -v $HOME/.cache/torch_extensions:/home/asiu/.cache/torch_extensions \
+    -v $HOME/.cache/dnnlib:/home/asiu/.cache/dnnlib \
+    -v $HOME/.cache/clip:/home/asiu/.cache/clip \
+    -v /home/calvin/etc/StyleCLIP:/home/asiu/styleclip \
+    -v $ASI_CODE:/home/asiu/code/asi \
+    -v $GOOGLE_APPLICATION_CREDENTIALS:/home/asiu/google_application_creds.json \
+    -w /home/asiu/code/asi \
+    ahanu/asi:styleclip bash

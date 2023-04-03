@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+import torch
+from PIL import Image
+import numpy as np
+import os
+from ai_old.util.pretrained import build_pretrained_sg2
+from ai_old.util.etc import normalized_tensor_to_pil_img, resize_imgs, \
+    create_img_grid
+
+
+FOLDER = '/home/asiu/data/gender-lerp-exp'
+GENDER_DIRS_FOLDER = '/home/asiu/data/lerp/mtf'
+
+MAGS = [0.5, 0.75, 1., 1.25, 1.5]
+
+GENDER_DIRS = [
+    ('0.npy', 1., 1.),
+    ('1.npy', 1., -1.),
+]
+
+
+def _reshape_dir(dir):
+    if dir.shape == (1, 512):
+        dir = dir.unsqueeze(1).repeat(1, 18, 1)
+    elif dir.shape == (1, 18, 512):
+        pass
+    elif dir.shape == (18, 512):
+        dir = dir.unsqueeze(0)
+    elif dir.shape == (512,):
+        dir = dir.unsqueeze(0).unsqueeze(0).repeat(1, 18, 1)
+    else:
+        raise Exception(dir.shape)
+    assert dir.shape == (1, 18, 512)
+    return dir
+
+
+def run():
+    for filename in os.listdir(os.path.join(FOLDER, 'aligned')):
+        id = int(filename.split('.')[0])
+        print(id)
+
+        gender = torch.ones(1, dtype=torch.float32, device='cuda')
+        sign = gender * 2. - 1.
+
+        w = torch.load(
+            os.path.join(FOLDER, 'pti-w', str(id), '0.pt'),
+        ).to('cuda').to(torch.float32)
+        # print('w', w.shape)
+        assert w.shape == (1, 18, 512)
+
+        pti_g_path = os.path.join(
+            FOLDER,
+            'pti-models',
+            f'{id}.pt',
+        )
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval()
+
+        og = Image.open(os.path.join(FOLDER, 'aligned', f'{id}.png'))
+        og = og.resize((256, 256), Image.LANCZOS)
+
+        swaps = []
+        for fname, dir_mult, dir_sign in GENDER_DIRS:
+            dir_path = os.path.join(GENDER_DIRS_FOLDER, fname)
+            dir = torch.tensor(
+                np.load(dir_path)).float().cuda()
+            dir = _reshape_dir(dir)
+            dir *= dir_mult * dir_sign
+
+            progression = [og]
+            for mag in MAGS:
+                delta = dir * sign
+                swap_w = w + delta * mag
+                img_tensor = G(swap_w, noise_mode='const')
+                img = normalized_tensor_to_pil_img(
+                    resize_imgs(img_tensor, 256)[0])
+                progression.append(img)
+
+            swaps.append(progression)
+
+        create_img_grid(swaps, 256).save(
+            os.path.join(FOLDER, 'results', f'{id}.png'))
+
+
+if __name__ == '__main__':
+    with torch.no_grad():
+        run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

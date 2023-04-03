@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from ai_old.nn.models.facegen import FaceGenerator
+from tqdm import tqdm
+from ai_old.nn.models.encode.arcface import ArcFaceWrapper
+from random import random
+from torchvision.utils import save_image
+import matplotlib.pyplot as plt
+from ai_old.util.etc import make_deterministic
+
+make_deterministic()
+
+N_SAMPLES = 128
+
+MAX_DELTA_MULT = 1.
+
+CROP = False
+
+facegen = FaceGenerator(imsize=128).to('cuda')
+facegen.eval()
+
+arcface = ArcFaceWrapper().to('cuda')
+arcface.eval()
+
+l2 = nn.MSELoss()
+l1 = nn.L1Loss()
+
+x = []
+y1 = []
+y2 = []
+y3 = []
+
+with torch.no_grad():
+    for i in tqdm(range(N_SAMPLES)):
+        # entangled latents
+        z1 = torch.randn(512)
+        delta = torch.randn(512) * random() * MAX_DELTA_MULT
+        z2 = z1 + delta
+        entangled_dist = l2(z1, z2)
+        entangled_zs = torch.cat(
+            [z1.unsqueeze(dim=0), z2.unsqueeze(dim=0)],
+            dim=0,
+        ).to('cuda')
+
+        # gen images and disentangled latents
+        ims, zs = facegen(entangled_zs, is_entangled=True)
+        disentangled_dist = F.mse_loss(zs[0], zs[1])
+        x.append(disentangled_dist.item())
+
+        # crop images
+        if CROP:
+            ims = ims[:, :, 18:112, 16:110]
+
+        # save generated images
+        save_image(
+            ims,
+            f'/home/asiu/data/tmp/afd/{i}.png',
+            normalize=True,
+            range=(-1, 1),
+        )
+
+        # calc arcface embeddings
+        embeddings = arcface(ims)
+
+        # calc embedding similarity
+        embedding_l2_dist = l2(embeddings[0], embeddings[1])
+        y1.append(embedding_l2_dist.item())
+        embedding_l1_dist = l1(embeddings[0], embeddings[1])
+        y2.append(embedding_l1_dist.item())
+        embedding_cosine_dist = 1. - embeddings[0].dot(embeddings[1])
+        y3.append(embedding_cosine_dist.item())
+
+plt.scatter(x, y1)
+plt.savefig('/home/asiu/data/tmp/asdf/y1.png')
+plt.clf()
+
+plt.scatter(x, y2)
+plt.savefig('/home/asiu/data/tmp/asdf/y2.png')
+plt.clf()
+
+plt.scatter(x, y3)
+plt.savefig('/home/asiu/data/tmp/asdf/y3.png')
+plt.clf()

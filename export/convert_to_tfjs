@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+import ai_old.constants as c
+from subprocess import call
+import os
+import sys
+
+
+def convert_g(base='ai_old.nn.models.prod.v0.ProdV0', exp='blend-ult/0/0'):
+    output_folder = os.path.join(c.EXP_PATH, exp, 'export')
+    os.makedirs(output_folder, exist_ok=True)
+    onnx_path = os.path.join(output_folder, 'g.onnx')
+    tf_path = os.path.join(output_folder, 'tf')
+    tfjs_path = os.path.join(output_folder, 'tfjs')
+
+    call(' '.join([
+        'onnx-tf',
+        'convert',
+        '-i', onnx_path,
+        '-o', tf_path,
+    ]), shell=True)
+
+    call(' '.join([
+        'tensorflowjs_converter',
+        '--input_format=tf_saved_model',
+        '--output_node_names=\'generated_img\'',
+        '--saved_model_tags=serve',
+        tf_path,
+        tfjs_path,
+    ]), shell=True)
+
+
+if __name__ == '__main__':
+    exp = sys.argv[1]
+    convert_g(exp=exp)

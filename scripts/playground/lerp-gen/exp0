@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn.functional as F
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from ai_old.util.pretrained import build_pretrained_sg2
+from ai_old.loss.perceptual.face import FaceIdLoss
+from ai_old.loss.gender import GenderLoss
+from ai_old.util.etc import normalized_tensor_to_pil_img, create_img_grid, \
+    resize_imgs
+from tqdm import tqdm
+from ai_old.nn.models.lerp.gen import SimplestLerpGen
+import math
+
+
+FOLDER = '/home/asiu/data/lerp-gen-exp/0'
+SAMPLES_FOLDER = os.path.join(FOLDER, 'samples')
+LOSS_FOLDER = os.path.join(FOLDER, 'loss')
+
+HPARAMS = [
+    {
+        'z_dims': 8,
+        'n_layers': 4,
+        'lr_mul': 1.,
+        'opt': 'adam',
+        'lr': 0.001,
+        'reg_weight': 10.,
+        'reg_scale': 0.5,
+    },
+]
+
+BATCH_SIZE = 8
+N_ITER = 200
+
+FACE_WEIGHT = 0.05
+DELTA_WEIGHT = 0.8
+CLASSIFY_WEIGHT = 1.
+
+
+def run():
+    img_generator = build_pretrained_sg2()
+    face_loss_model = FaceIdLoss(256).eval().requires_grad_(False).to('cuda')
+    classify_loss_model = GenderLoss(l2=False).eval().requires_grad_(False).to(
+        'cuda')
+
+    w_path = os.path.join(FOLDER, 'w.npy')
+    if os.path.isfile(w_path):
+        w = torch.from_numpy(np.load(w_path)).to('cuda').to(torch.float32)
+    else:
+        z = torch.randn([1, 512], device='cuda')
+        w = img_generator.mapping(z, None, truncation_psi=0.8)
+        np.save(w_path, w.cpu().numpy())
+    w = w.repeat(BATCH_SIZE, 1, 1)
+
+    img_generator = img_generator.synthesis
+    img = img_generator(w, noise_mode='const')
+    img = resize_imgs(img, 256)
+    gender = torch.ones([BATCH_SIZE, 1], device='cuda')
+
+    for exp, hp in enumerate(HPARAMS):
+        G = SimplestLerpGen(
+            z_dims=hp['z_dims'],
+            n_layers=hp['n_layers'],
+            lr_mul=hp['lr_mul'],
+        ).train().to('cuda')
+
+        assert hp['opt'] == 'adam'
+        opt = torch.optim.Adam(G.parameters(), lr=hp['lr'])
+
+        inv_root_z_dims = 1. / math.sqrt(hp['z_dims'])
+
+        delta_losses = []
+        face_losses = []
+        classify_losses = []
+        reg_losses = []
+        total_losses = []
+        for i in tqdm(range(N_ITER)):
+            opt.zero_grad()
+
+            z1 = torch.randn([BATCH_SIZE, hp['z_dims']], device='cuda')
+            z2 = torch.randn([BATCH_SIZE, hp['z_dims']], device='cuda')
+
+            w1 = G(z1, w)
+            w2 = G(z2, w)
+
+            img1 = img_generator(w1, noise_mode='const')
+            img1 = resize_imgs(img1, 256)
+            img2 = img_generator(w2, noise_mode='const')
+            img2 = resize_imgs(img2, 256)
+
+            delta_loss = F.mse_loss(w1, w) + F.mse_loss(w2, w)
+
+            face_loss = face_loss_model(img1, img).mean() + \
+                face_loss_model(img2, img).mean()
+
+            classify_loss = classify_loss_model(img1, 1. - gender).mean() + \
+                classify_loss_model(img2, 1. - gender).mean()
+
+            # print((z2 - z1).norm(dim=1) * inv_root_z_dims)
+            reg_loss = F.mse_loss(
+                (w2[:, 0, :] - w1[:, 0, :]).norm(dim=1) * hp['reg_scale'],
+                (z2 - z1).norm(dim=1) * inv_root_z_dims,
+            )
+
+            total_loss = face_loss * FACE_WEIGHT + \
+                delta_loss * DELTA_WEIGHT + \
+                classify_loss * CLASSIFY_WEIGHT + \
+                reg_loss * hp['reg_weight']
+
+            delta_losses.append(delta_loss.item())
+            face_losses.append(face_loss.item())
+            classify_losses.append(classify_loss.item())
+            reg_losses.append(reg_loss.item())
+            total_losses.append(total_loss.item())
+
+            total_loss.backward()
+            opt.step()
+
+        plt.plot(delta_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_delta.png'))
+        plt.clf()
+
+        plt.plot(face_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_face.png'))
+        plt.clf()
+
+        plt.plot(classify_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_classify.png'))
+        plt.clf()
+
+        plt.plot(reg_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_reg.png'))
+        plt.clf()
+
+        plt.plot(total_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_total.png'))
+        plt.clf()
+
+        grid = []
+        for y in range(4):
+            row = []
+            for x in range(4):
+                if x == 0 and y == 0:
+                    new_w = w
+                else:
+                    z = torch.randn([1, hp['z_dims']], device='cuda')
+                    new_w = G(z, w)
+                new_img = img_generator(new_w, noise_mode='const')
+                new_img = resize_imgs(new_img, 256)
+                row.append(normalized_tensor_to_pil_img(new_img[0]))
+            grid.append(row)
+        create_img_grid(grid, 256).save(
+            os.path.join(SAMPLES_FOLDER, f'{exp}.png'))
+
+
+if __name__ == '__main__':
+    run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

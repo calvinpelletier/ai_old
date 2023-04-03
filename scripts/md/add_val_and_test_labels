@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+import numpy as np
+from ai_old.dataset.metadata_manager import DatasetItemId
+from ai_old.dataset.metadata_manager import get
+from ai_old.dataset.synthswap.pg import PairedGenderDataset
+from ai_old.dataset.synthswap.lerp import GenderLerpDataset
+from ai_old.dataset.realface.ffhq import FfhqDataset, FemaleFfhqDataset
+from ai_old.dataset.ult import UltDataset
+from ai_old.dataset.seed import GaussianSeedDataset
+
+
+##############################
+# Hardcoded labels, optional #
+##############################
+TEST_SET_ITEMS = [DatasetItemId("facegen", item_id) for item_id in
+                  ["00189", "00769", "00860", "01021", "01267", "01585", "01685", "01899", "02433", "02612", "02747",
+                   "03556", "03890", "03943", "05311", "06265", "06396", "08433", "08792", "10627", "11016", "11284",
+                   "11394", "14502", "14541", "15795", "16023", "16850", "17159", "17568", "18431", "18942", "19118",
+                   "19457", "19769", "21777", "21962", "23483", "23897", "23939", "25658", "26531", "27480", "28693",
+                   "30740", "31551", "35773", "35920", "37194", "37819", "38158", "39188", "40994", "41090", "41434",
+                   "41606", "43001", "43021", "43323", "44131", "44732", "44974", "47191", "48555"]]
+
+SET_LABEL_COL_NAME = "set_labels"
+
+CLEAN_FFHQ = [
+    '80002', '80013', '80014', '80007', '80015', '80012', '80001', '80006',
+    '80009', '80005', '80000', '80003', '80010', '80008', '00002', '00003',
+    '00006', '00007', '00010', '00012', '00013', '00014', '00015', '00017',
+    '00018', '00019', '00020', '00023', '00027', '00029', '00035', '00037',
+    '00040', '00041', '00042', '00043', '00045', '00048', '00050', '00052',
+    '00055', '00056', '00057', '00058', '00059', '00064', '00066', '00071',
+    '00072', '00073', '00074', '00076', '00077', '00078', '00079', '00081',
+    '00082', '00083', '00086', '00088', '00089', '00090', '00093', '00095',
+]
+assert len(CLEAN_FFHQ) == 64
+
+
+def add_set_labels(mm, filter_func, set_label, num):
+    # Select `num` random indices.
+    keys = list(mm.read_all_data(filter_func).keys())
+    indices = np.random.choice(np.arange(len(keys)), size=num, replace=False)
+    item_ids = [keys[idx] for idx in indices]
+
+    for full_item_id in item_ids:
+        dataset = full_item_id.dataset
+        item_id = full_item_id.item_id
+        print("Labeled: %s%s" % (dataset, item_id))
+        cur_set = set(mm.read_single_value(dataset, item_id, SET_LABEL_COL_NAME))
+        cur_set.add(set_label)
+        mm.add_or_update_columns(dataset, item_id, **{SET_LABEL_COL_NAME: cur_set})
+
+
+def add_hardcoded_set_labels(mm, dataset, set_label, item_ids):
+    for item_id in item_ids:
+        cur_set = set(mm.read_single_value(dataset, item_id, SET_LABEL_COL_NAME))
+        cur_set.add(set_label)
+        mm.add_or_update_columns(dataset, item_id, **{SET_LABEL_COL_NAME: cur_set})
+        print("Labeled: %s %s" % (dataset, item_id))
+    mm.save()
+
+
+def run(mm, dataset, test_set_label=None, val_set_label=None):
+    np.random.seed(42)
+
+    ds = dataset()
+    ff = ds.filter_func()
+
+    if test_set_label is None:
+        test_set_label = ds.test_set_label()
+    if val_set_label is None:
+        val_set_label = ds.val_set_label()
+
+    # add_hardcoded_set_labels(mm, TEST_SET_LABEL, TEST_SET_ITEMS)
+    add_set_labels(mm, ff, test_set_label, num=64)
+    add_set_labels(mm, ff, val_set_label, num=512)
+
+    print("Number of objects in test set: ",
+          len(mm.read_all_data(row_filter_func=lambda x: test_set_label in x.get(SET_LABEL_COL_NAME, []),
+                               select_cols=["item_id"])))
+    print("Number of objects in val set: ",
+          len(mm.read_all_data(row_filter_func=lambda x: val_set_label in x.get(SET_LABEL_COL_NAME, []),
+                               select_cols=["item_id"])))
+    print("Size of union: ", len(mm.read_all_data(
+        row_filter_func=lambda x: SET_LABEL_COL_NAME in x and (
+                val_set_label in x[SET_LABEL_COL_NAME] or test_set_label in x[SET_LABEL_COL_NAME]),
+        select_cols=["item_id"])))
+
+    mm.save()
+
+
+def clear(mm):
+    # TODO: maybe make this more flexible. Right now it clears the set label column from all rows.
+    mm.clear_column(SET_LABEL_COL_NAME)
+
+
+if __name__ == '__main__':
+    mm = get()
+    # clear(mm)
+    # run(mm, PairedGenderDataset)
+    # run(mm, GenderLerpDataset)
+    # run(mm, FfhqDataset)
+    # run(mm, FemaleFfhqDataset)
+    # run(mm, UltDataset)
+    # run(mm, GaussianSeedDataset)
+    add_hardcoded_set_labels(mm, 'ffhq-128', 'clean', CLEAN_FFHQ)

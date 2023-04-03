@@ -1,0 +1,9 @@
+# These commands are run upon launching a new compute instance for the inference server.
+#
+# Not run directly in the repo, just version controlling this so we have it. It's used in the GCP UI when creating
+# a compute instance.
+
+
+cd /home/wilson/
+gsutil cp gs://fp-test-bucket/docker-compose.yml docker-compose.yml
+docker-compose up -d

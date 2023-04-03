@@ -1,0 +1,47 @@
+name: 'mtf64, g=res, d=patch, test0'
+
+dataset:
+    type: 'rgb2rgb'
+    name: 'mtf-gen-64'
+    res: 64
+    aug:
+        flip: True
+
+model:
+    type: 'cgan'
+    g:
+        type: 'ai_old.models.g.res.ResGenerator'
+        outer_channels: 64
+        outer_kernel_size: 5
+        n_downsampling: 1
+        n_blocks: 8
+    d:
+        type: 'ai_old.models.d.patch.PatchDiscriminator'
+        initial_channels: 64
+        max_channels: 512
+        n_inner_layers: 2
+
+train:
+    epochs: 50
+    batch_size: 8
+    loss:
+        gan:
+            weight: 1.0
+            type: 'hinge'
+        feat_match:
+            weight: 10.0
+        perceptual:
+            weight: 10.0
+            type: 'vgg19'
+    g:
+        lr: 0.0001
+        beta1: 0.
+        beta2: 0.999
+        step_size: 25
+        gamma: 0.1
+    d:
+        lr: 0.0004
+        beta1: 0.
+        beta2: 0.999
+        step_size: 25
+        gamma: 0.1

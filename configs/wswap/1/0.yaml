@@ -1,0 +1,21 @@
+info: '[null trainer] using ss model on e4e inversions'
+task: 'ai_old.task.w_plus.SwapTask'
+seed: 0
+fp32: False
+n_steps: 4000
+eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.w_plus.RealOnlySwapDataset'
+    imsize: 1024
+    # batch_size: 'auto'
+    batch_size: 8
+    batch_gpu: 'auto'
+    xflip: False
+
+trainer:
+    type: 'ai_old.trainer.w_plus.NullSwapTrainer'
+
+model:
+    type: 'ai_old.nn.models.swap.w_plus.SwapperAndGenerator'
+    swapper_type: 'pretrained_ss'

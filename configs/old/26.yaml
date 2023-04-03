@@ -1,0 +1,15 @@
+name: 'delta g perceptual magnitutde calc'
+inferencer: 'ai_old.inf.perceptual.PerceptualMag'
+
+dataset:
+    type: 'mk2'
+    size: 64
+    paired: 'delta-g-64'
+    unpaired: 'itw'
+    split: 0.95
+    exp: 19 # continuous gender classifier
+    aug:
+        flip: True
+
+inf:
+    batch_size: 32

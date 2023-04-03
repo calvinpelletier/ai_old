@@ -1,0 +1,26 @@
+info: 'predict various attributes given a sg2 disentangled latent vector'
+task: 'ai_old.task.synthswap.zattr.ZAttrTask'
+
+dataset:
+    type: 'ai_old.dataset.synthswap.zattr.ZAttrDataset'
+    batch_size: 32
+    split: 0.99
+
+model:
+    type: 'ai_old.nn.models.synthswap.zattr.ZAttrPredictor'
+    attr_hidden_layers: [512, 256, 128, 32, 8]
+    norm: 'none'
+
+loss:
+    type: 'ai_old.loss.synthswap.zattr.ZAttrLoss'
+    mouth:
+        weight: .01
+    glasses:
+        weight: 1
+
+trainer:
+    type: 'ai_old.trainer.synthswap.zattr.ZAttrTrainer'
+    opt: 'ranger'
+    lr: 0.01
+    sch: 'flat_cosine'
+    n_epochs: 40

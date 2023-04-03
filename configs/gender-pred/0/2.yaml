@@ -1,0 +1,22 @@
+info: 'predict gender given a face image'
+task: 'ai_old.task.classify.gender.GenderClassification'
+
+dataset:
+    type: 'ai_old.dataset.classify.gender.ImgGenderClassificationDataset'
+    batch_size: 32
+    split: 0.99
+
+model:
+    type: 'ai_old.nn.models.classify.gender.ImgGenderClassifier'
+
+loss:
+    type: 'ai_old.loss.common.BinaryLoss'
+    pred_key: 'gender_pred'
+    target_key: 'gender'
+
+trainer:
+    type: 'ai_old.trainer.classify.img.ImgClassificationTrainer'
+    opt: 'ranger'
+    lr: 0.01
+    sch: 'flat_cosine'
+    n_epochs: 60

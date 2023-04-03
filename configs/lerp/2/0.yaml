@@ -1,0 +1,49 @@
+info: 'stage1: lerp/5/5; stage2: hair clip, face, delta'
+task: 'ai_old.task.lerp.WPlusDualLerpTask'
+seed: 0
+fp32: false
+n_steps: 400000
+eval_freq: 20000
+
+gendered: true
+
+dataset:
+    type: 'ai_old.dataset.w_plus.RealInversionDataset'
+    imsize: 256
+    batch_size: 8
+    batch_gpu: 'auto'
+    xflip: false
+
+trainer:
+    type: 'ai_old.trainer.lerp.WPlusDualLerpTrainer'
+
+opt:
+    type: 'ranger'
+    lr: 0.5
+
+model:
+    type: 'ai_old.nn.models.lerp.dynamic.DualLerperAndSegGenerator'
+    lerper_type: 'levels'
+    levels: ['coarse', 'medium']
+    final_activation: 'linear'
+    mult: 0.1
+    lr_mul: 0.01
+
+loss:
+    type: 'ai_old.loss.lerp.WPlusDualLerpLoss'
+    clip:
+        target_text: ['male face', 'female face']
+        weight: 0.
+    face:
+        weight: 0.1
+    delta:
+        weight: 0.8
+    ss_delta:
+        weight: 0.
+    hair_clip:
+        target_text: ['short hair', 'long hair']
+        weight: 1.
+    nonhair_l2_pixel:
+        weight: 0.
+        detach_mask: true
+        area_normalize: false

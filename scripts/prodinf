@@ -1,0 +1,7 @@
+docker run -u $(id -u):$(id -g) --gpus=all -it --shm-size=32g \
+    -v $ASI_DATA:/home/asiu/data \
+    -v $HOME/.cache/torch:/home/asiu/.cache/torch \
+    -v $HOME/.cache/torch_extensions:/home/asiu/.cache/torch_extensions \
+    -v $ASI_CODE:/home/asiu/code/asi \
+    -w /home/asiu/code/asi \
+    asi/asi:latest ./scripts/inf --id prod

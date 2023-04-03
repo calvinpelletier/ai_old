@@ -1,0 +1,40 @@
+info: 'less delta'
+task: 'ai_old.task.lerp.WPlusLerpTask'
+seed: 0
+fp32: false
+n_steps: 400000
+eval_freq: 20000
+
+gendered: true
+
+dataset:
+    type: 'ai_old.dataset.w_plus.RealInversionDataset'
+    imsize: 256
+    batch_size: 8
+    batch_gpu: 'auto'
+    xflip: false
+
+trainer:
+    type: 'ai_old.trainer.lerp.WPlusLerpTrainer'
+
+opt:
+    type: 'ranger'
+    lr: 0.5
+
+model:
+    type: 'ai_old.nn.models.lerp.dynamic.LerperAndGenerator'
+    lerper_type: 'levels'
+    levels: ['coarse', 'medium', 'fine']
+    final_activation: 'linear'
+    mult: 0.1
+    lr_mul: 0.01
+
+loss:
+    type: 'ai_old.loss.lerp.WPlusLerpLoss'
+    face:
+        weight: 0.1
+    delta:
+        weight: 0.4
+    classify:
+        weight: 1.
+        l2: false

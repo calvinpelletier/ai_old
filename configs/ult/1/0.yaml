@@ -1,0 +1,35 @@
+info: 'test swap only'
+task: 'ai_old.task.ult.SwapOnlyUltTask'
+
+dataset:
+    type: 'ai_old.dataset.ult.SwapOnlyUltDataset'
+    batch_size: 32
+
+trainer:
+    type: 'ai_old.trainer.ult.NonGanUltTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.ult.UltModel'
+    real_enabled: false
+    gan_enabled: false
+    swap_enabled: true
+    z_dims: 256
+    nc_base: 16
+    nc_max: 256
+    f_n_layers: 4
+
+loss:
+    type: 'ai_old.loss.ult.UltLoss'
+    dz:
+        weight: 1
+    identity:
+        weight: 1
+    swap_pixel:
+        weight: 1

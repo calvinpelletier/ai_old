@@ -1,0 +1,39 @@
+name: '128x128 binary gender classifier wrapping arcface'
+trainer: 'ai_old.trainers.classifier.BinaryClassifierTrainer'
+inferencer: 'ai_old.inf.classifier.BinaryClassifierInferencer'
+
+deps:
+    facerecog:
+        path: 'arcface/model_ir_se50.pth'
+        frozen: True
+        imsize: 112
+        dims_out: 512
+
+dataset:
+    type: 'ffhq-gender'
+    name: 'itw-128'
+    split: 0.99
+    imsize: 128
+    aug:
+        flip: True
+
+model:
+    c:
+        type: 'ai_old.models.c.transfer.TransferMlpClassifier'
+        transfer: 'facerecog'
+        n_classes: 1
+        hidden: [256, 64, 16]
+        norm: 'none'
+        activation: 'relu'
+        weight_norm: False
+
+train:
+    epochs: 10
+    batch_size: 32
+    opt:
+        lr: 0.01
+        step_size: 4
+        gamma: 0.5
+
+inf:
+    batch_size: 32

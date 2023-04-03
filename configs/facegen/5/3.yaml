@@ -1,0 +1,57 @@
+info: 'sg2 g (without ppl reg) and unet d, adabelief'
+task: 'ai_old.task.facegen.facegen.FacegenTask'
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqGanDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.gan.GanTrainerCustomSampler'
+    n_epochs: 800
+    model_ema: True
+
+opt:
+    type: 'adabelief'
+    hparams: 'large_gan'
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.facegen.style.StyleGeneratorWrapper'
+
+loss:
+    type: 'ai_old.loss.unet.UnetGLoss'
+    enc:
+        weight: 1
+    dec:
+        weight: [0, 1, 30000]
+
+# discriminator
+subtrainer:
+    type: 'ai_old.trainer.discriminator.CutmixRegDiscriminatorTrainer'
+    name: 'd'
+
+    model:
+        type: 'ai_old.nn.models.discriminate.unet.UnetDiscriminator'
+        nc_base: 32
+        n_res: 2
+
+    loss:
+        type: 'ai_old.loss.unet.UnetDLoss'
+        enc:
+            weight: 1
+        dec:
+            weight: [0, 1, 30000]
+        gp_enc:
+            freq: 4
+            weight: 10
+        gp_dec:
+            freq: [4, 2]
+            weight: [0, 10, 30000]
+        cutmix:
+            prob: [0, 0.25, 30000]
+            weight: [0, 1, 30000]
+
+    opt:
+        type: 'adabelief'
+        hparams: 'large_gan'
+        sch: 'flat_cosine'

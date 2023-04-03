@@ -1,0 +1,29 @@
+info: 'rec/12/2 duplicate'
+task: 'ai_old.task.rec.RecTask'
+seed: 0
+fp32: False
+n_steps: 25000000
+# eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqGanDataset'
+    imsize: 128
+    batch_size: 'auto'
+    batch_gpu: 'auto'
+    xflip: True
+
+trainer:
+    type: 'ai_old.trainer.rec.RecTrainer'
+
+opt:
+    type: 'adam'
+    hparams: 'auto-sg2'
+    sch: 'flat'
+
+model:
+    type: 'ai_old.nn.models.encgen.ae.GeneratorInitializedAutoencoder'
+    g_exp: 'facegen/8/1'
+
+loss:
+    type: 'ai_old.loss.rec.FancyRecLoss'
+    perceptual_type: 'lpips'

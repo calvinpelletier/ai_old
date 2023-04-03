@@ -1,0 +1,43 @@
+info: '[fg] 4/1 without face loss'
+task: 'ai_old.task.ult.UltTask'
+
+dataset:
+    type: 'ai_old.dataset.ult.FgUltDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.ult.NonGanUltTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.ult.UltModel'
+    real_enabled: true
+    gan_enabled: false
+    swap_enabled: true
+    z_dims: 256
+    nc_base: 16
+    nc_max: 256
+    f_n_layers: 4
+
+loss:
+    type: 'ai_old.loss.ult.UltLoss'
+    real_rec_perceptual:
+        weight: 10
+    gender:
+        weight: 1
+    dz_mtf:
+        weight: 1
+    dz_ftm:
+        weight: 1
+    identity:
+        weight: 0.1
+    male_rec_pixel:
+        weight: 5
+    female_rec_pixel:
+        weight: 5

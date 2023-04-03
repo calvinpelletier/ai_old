@@ -1,0 +1,26 @@
+info: '[fg] light fully modulated ae, excitation g, 4x4 bottleneck, pixel loss'
+task: 'ai_old.task.rec.rec.RecTask'
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FgFfhqGanDataset'
+    batch_size: 32
+
+trainer:
+    type: 'ai_old.trainer.iit.NonGanRecTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.playground.LightFullyModulatedAutoencoder'
+    smallest_imsize: 4
+    up_type: 'excitation'
+
+loss:
+    type: 'ai_old.loss.imsim.ImsimLoss'
+    pixel:
+        weight: 1

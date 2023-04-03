@@ -1,0 +1,32 @@
+# Some inspo:
+# https://testdriven.io/blog/dockerizing-flask-with-postgres-gunicorn-and-nginx/
+# https://github.com/sladkovm/docker-flask-gunicorn-nginx
+
+# TODO: Support dev/prod environments?
+
+version: '3.7'
+
+services:
+  web:
+    # TODO: add gpu requirement
+    image: gcr.io/hallowed-byte-293317/asi-rel-test
+    command: gunicorn --bind 0.0.0.0:8000 server.main:app
+    working_dir: /home/asiu/code/asi
+    ports:
+      # Maps external port 8000 into port 8000 in the container.
+      - 8000:8000
+  nginx:
+    image: gcr.io/hallowed-byte-293317/asi-nginx
+    volumes:
+      # TODO wtf are volumes
+      - static_volume:/home/app/web/project/static
+      - media_volume:/home/app/web/project/media
+    ports:
+      # Maps external port 80 into port 80 in the (nginx) container.
+      - 80:80
+    depends_on:
+      - web
+
+volumes:
+  static_volume:
+  media_volume:

@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+import matplotlib.pyplot as plt
+from collections import defaultdict
+import numpy as np
+import math
+import shutil
+
+
+PERFECT = set([
+    '656',
+    '1338',
+    '1606',
+    '1969',
+    '2362',
+    '2640',
+    '5015',
+    '5069',
+    '5341',
+    '5484',
+    '5920',
+    '8605',
+    '10697',
+    '10833',
+    '10873',
+    '11233',
+    '11365',
+    '12488',
+    '12892',
+    '13067',
+    '13362',
+    '13714',
+    '13850',
+    '14209',
+    '14438',
+    '14990',
+    '16003',
+    '16716',
+    '16786',
+    '16809',
+    '16838',
+    '18359',
+    '18959',
+    '19693',
+    '19852',
+    '20086',
+    '20230',
+    '20247',
+    '20400',
+    '20564',
+    '20982',
+    '21017',
+    '21217',
+    '23689',
+    # NOTE: uncomplete
+])
+
+LABEL_TO_IDX = {x: i for i, x in enumerate(['good', 'bad', 'skip'])}
+
+IMG_SRC = '/home/calvin/projects/asi/devserver/static/img/labelee/{}.png'
+TMP_DEST = '/home/calvin/data/asi/tmp/notcut/{}.png'
+
+def run():
+    id_to_metrics = defaultdict(dict)
+    uid_to_counts = {}
+    with open('/home/calvin/data/asi/swap_labels.csv', 'r') as f:
+        for line in f:
+            uid, id, label = line.strip().split(',')
+            if uid not in uid_to_counts:
+                uid_to_counts[uid] = [0, 0, 0]
+            uid_to_counts[uid][LABEL_TO_IDX[label]] += 1
+            if 'label' in id_to_metrics[id]:
+                print(f'duplicate {id}: {id_to_metrics[id]} and {label}')
+            else:
+                if id in PERFECT:
+                    id_to_metrics[id]['label'] = 'perfect'
+                else:
+                    id_to_metrics[id]['label'] = label
+                # if label == 'good':
+                #     shutil.copy(IMG_SRC.format(id), TMP_DEST.format(id))
+
+    print(uid_to_counts)
+    for uid, v in uid_to_counts.items():
+        # good_ratio = v[LABEL_TO_IDX['good']] / sum(v)
+        # bad_ratio = v[LABEL_TO_IDX['bad']] / sum(v)
+        skip_ratio = v[LABEL_TO_IDX['skip']] / sum(v)
+        good_bad_ratio = v[LABEL_TO_IDX['good']] / v[LABEL_TO_IDX['bad']]
+        print(f'{uid}: {skip_ratio:.3f}, {good_bad_ratio:.3f}')
+
+    _load_metrics(
+        '/home/calvin/data/asi/z-exploration/y/0/metrics.csv',
+        id_to_metrics,
+    )
+    _load_metrics(
+        '/home/calvin/data/asi/z-exploration/y/1/metrics.csv',
+        id_to_metrics,
+    )
+
+    print(len(id_to_metrics))
+    # _lenient_cuts(id_to_metrics)
+    # print(len(id_to_metrics))
+    # _harsh_cuts(id_to_metrics)
+    # print(len(id_to_metrics))
+    # for id in id_to_metrics:
+    #     shutil.copy(IMG_SRC.format(id), TMP_DEST.format(id))
+
+    # _divide_and_bucket_age(id_to_metrics, show=0)
+    # _divide_and_bucket_age(id_to_metrics, show=0, range_=(1., 4.))
+    # _divide_and_bucket_age(id_to_metrics, show=1)
+    # _divide_and_bucket_age(id_to_metrics, show=1, range_=(5., 15.))
+    # _divide_and_bucket_age(id_to_metrics, show=2)
+    # _divide_and_bucket_age(id_to_metrics, show=2, range_=(3, 7))
+    # _divide_and_bucket_age(id_to_metrics, show=3)
+    # _divide_and_bucket_age(id_to_metrics, show=3, range_=(0, 20))
+
+    # 0 age cut at 3
+    # 1 age cut at 10
+    # 2 age cut at 10
+    # 3 age cut at 20
+
+    # _divide_and_show(id_to_metrics, 'mouth', 20)
+    # _divide_and_show(id_to_metrics, 'glasses', 20)
+    # _divide_and_show(id_to_metrics, 'percep', 20)
+    # _divide_and_show(id_to_metrics, 'percep', 20, (.8, .9))
+    # _divide_and_show(id_to_metrics, 'gender', 20)
+    # _divide_and_show(id_to_metrics, 'gender', 20, (0., .2))
+    # _divide_and_show(id_to_metrics, 'arcface', 20)
+    # _divide_and_show(id_to_metrics, 'arcface', 20, (.8, 1.))
+    _divide_and_show(id_to_metrics, 'scaled_age_diff', 20, (0, 10))
+
+
+def _lenient_cuts(id_to_metrics):
+    for id in list(id_to_metrics.keys()):
+        if id_to_metrics[id]['percep'] > 1.0:
+            del id_to_metrics[id]
+        elif id_to_metrics[id]['arcface'] > 0.83:
+            del id_to_metrics[id]
+        elif id_to_metrics[id]['age0'] <= 20 and \
+                id_to_metrics[id]['age_diff'] > 10:
+            del id_to_metrics[id]
+        elif id_to_metrics[id]['age0'] > 20 and \
+                id_to_metrics[id]['age_diff'] > 20:
+            del id_to_metrics[id]
+        elif id_to_metrics[id]['gender'] > 0.025:
+            del id_to_metrics[id]
+
+
+def _harsh_cuts(id_to_metrics):
+    for id in list(id_to_metrics.keys()):
+        if id_to_metrics[id]['percep'] < 0.6:
+            del id_to_metrics[id]
+        elif id_to_metrics[id]['mouth'] > 45:
+            del id_to_metrics[id]
+        elif id_to_metrics[id]['glasses'] > 350:
+            del id_to_metrics[id]
+        # elif id_to_metrics[id]['age0'] < 20 and \
+        #         id_to_metrics[id]['age_diff'] > 10:
+        #     del id_to_metrics[id]
+        # elif id_to_metrics[id]['age0'] >= 20 and \
+        #         id_to_metrics[id]['age_diff'] > 20:
+        #     del id_to_metrics[id]
+        elif id_to_metrics[id]['gender'] > 0.016:
+            del id_to_metrics[id]
+
+
+def _divide_and_show(id_to_metrics, metric, bins, range_=None):
+    perfect, good, bad = _divide_metrics(id_to_metrics, metric)
+    _hist(perfect, good, bad, bins, range_)
+
+
+def _hist(perfect, good, bad, bins, range_=None):
+    plt.hist(
+        [perfect, good, bad],
+        bins=bins,
+        range=range_,
+        density=True,
+        histtype='bar',
+        color=['g', 'b', 'r'],
+    )
+    plt.show()
+
+
+def _load_metrics(path, id_to_metrics):
+    with open(path, 'r') as f:
+        for line in f:
+            id, percep, gender, arcface, age0, age1, mouth, glasses = \
+                line.strip().split(',')
+            age0 = float(age0)
+            age1 = float(age1)
+            age_diff = abs(age0 - age1)
+            scaled_age_diff = age_diff / \
+                (10. / (1. + math.exp(-0.15 * age0 + 4))) + 1.
+            if id in id_to_metrics:
+                id_to_metrics[id]['percep'] = float(percep)
+                id_to_metrics[id]['gender'] = float(gender)
+                id_to_metrics[id]['arcface'] = float(arcface)
+                id_to_metrics[id]['age0'] = age0
+                id_to_metrics[id]['age1'] = age1
+                id_to_metrics[id]['age_diff'] = age_diff
+                id_to_metrics[id]['scaled_age_diff'] = scaled_age_diff
+                id_to_metrics[id]['mouth'] = float(mouth)
+                id_to_metrics[id]['glasses'] = float(glasses)
+
+
+def _divide_metrics(id_to_metrics, metric):
+    good = []
+    bad = []
+    perfect = []
+    for metrics in id_to_metrics.values():
+        if metrics['label'] == 'good':
+            good.append(metrics[metric])
+        elif metrics['label'] == 'bad':
+            bad.append(metrics[metric])
+        elif metrics['label'] == 'perfect':
+            perfect.append(metrics[metric])
+    return np.array(perfect), np.array(good), np.array(bad)
+
+
+def _divide_and_bucket_age(id_to_metrics, show=None, range_=None):
+    good = defaultdict(list)
+    bad = defaultdict(list)
+    perfect = defaultdict(list)
+    for metrics in id_to_metrics.values():
+        bucket = _age_to_bucket(metrics['age0'])
+        if metrics['label'] == 'good':
+            good[bucket].append(metrics['age_diff'])
+        elif metrics['label'] == 'bad':
+            bad[bucket].append(metrics['age_diff'])
+        elif metrics['label'] == 'perfect':
+            bad[bucket].append(metrics['age_diff'])
+    if show is None:
+        return good, bad
+    else:
+        _hist(perfect[show], good[show], bad[show], 20, range_)
+
+
+def _age_to_bucket(age):
+    if age < 10:
+        return 0
+    elif age < 20:
+        return 1
+    elif age < 40:
+        return 2
+    elif age < 70:
+        return 3
+    else:
+        return 4
+
+
+if __name__ == '__main__':
+    run()

@@ -1,0 +1,2 @@
+comparison_metric: 'l2_pixel'
+base_image_columns: ['outer_192']

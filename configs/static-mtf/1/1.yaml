@@ -1,0 +1,47 @@
+info: 'static male-to-female gender swap using res g and dual-rgb style d'
+task: 'ai_old.task.genderswap.static.StaticMtfTask'
+
+dataset:
+    type: 'ai_old.dataset.synthswap.pg.PairedGenderDataset'
+    batch_size: 32
+    split: 0.99
+
+trainer:
+    type: 'ai_old.trainer.gan.ConditionalGanTrainer'
+    n_epochs: 70
+
+opt:
+    type: 'ranger'
+    lr: 0.001
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.iit.res.ResIIT'
+
+loss:
+    type: 'ai_old.loss.iit.gan.GuidedGLoss'
+    gan:
+        type: 'softplus'
+        weight: 1
+    lpips:
+        weight: .1
+
+# discriminator
+subtrainer:
+    type: 'ai_old.trainer.discriminator.PairedImgDiscriminatorTrainer'
+    name: 'd'
+
+    model:
+        type: 'ai_old.nn.models.discriminate.style.StyleDiscriminator'
+        nc_in: 6 # dual rgb
+        channels: [512, 512, 512, 256, 128, 64]
+
+    loss:
+        type: 'ai_old.loss.gan.DLoss'
+        gan:
+            type: 'softplus'
+
+    opt:
+        type: 'ranger'
+        lr: 0.001
+        sch: 'flat_cosine'

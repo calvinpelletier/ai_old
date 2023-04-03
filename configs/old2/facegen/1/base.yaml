@@ -1,0 +1,51 @@
+name: '128x128 mini stylegan2'
+trainer: 'ai_old.trainers.gan.GanTrainer'
+
+dataset:
+    type: 'rgb-gan'
+    name: 'ffhq-128'
+    imsize: 128
+    n_val: 32
+    latent_dims: 256
+    aug:
+        flip: True
+
+model:
+    # at imsize 4    8   16   32   64  128
+    channels: [256, 256, 256, 128, 64, 32]
+    g:
+        type: 'ai_old.models.g.style.LatentStyleGenerator'
+        mlp:
+            n: 6
+            lr_mult: 0.01
+
+    d:
+        type: 'ai_old.models.d.style.StyleDiscriminator'
+
+train:
+    loss:
+        r1_reg:
+            weight: 10
+            freq: 16
+        ppl_reg:
+            weight: 2
+            freq: 4
+            batch_div: 2
+    latent_mix: 0.9
+    batch_size: 16
+    epochs: 20
+    opt:
+        g:
+            lr: 0.002
+        d:
+            lr: 0.002
+
+eval:
+    freq: 100000
+    n_ephemeral: 10000
+    batch_size: 64
+    metrics: ['fid', 'precision', 'recall']
+
+    # TODO: better system for this
+    gt_manifold: '<SET_BY_DATASET>'
+    gt_manifold_stats: '<SET_BY_DATASET>'

@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+import os
+import argparse
+import shutil
+from ai_old.trainer.loop2 import training_loop
+from ai_old.util import config
+import ai_old.constants as c
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='asi trainer')
+    parser.add_argument('--cfg', type=str, required=True,
+                        help='path rel to configs folder')
+    parser.add_argument('--resume', action='store_true',
+                        help='continue from latest save')
+    parser.add_argument('--skip_prompt', action='store_true',
+                        help='skip any run prompts')
+    return parser.parse_args()
+
+
+def setup_training_config(cfg, resume, run_dir):
+    # validation
+    assert hasattr(cfg, 'infra_version') and cfg.infra_version == 1
+
+    # defaults
+    if not hasattr(cfg, 'logging_freq'):
+        cfg.logging_freq = 4000
+    if not hasattr(cfg, 'eval_freq'):
+        cfg.eval_freq = 200000
+
+    # transfer from args to cfg
+    cfg.resume = resume
+    cfg.run_dir = run_dir
+
+    # paths
+    cfg.saves_dir = os.path.join(cfg.run_dir, 'saves')
+    os.makedirs(cfg.saves_dir, exist_ok=True)
+    cfg.logs_dir = os.path.join(cfg.run_dir, 'logs')
+    os.makedirs(cfg.logs_dir, exist_ok=True)
+
+
+def run(args):
+    config_path = os.path.join(c.CONFIGS_FOLDER, 'train', args.cfg)
+    if not config_path.endswith('.yaml'):
+        config_path += '.yaml'
+
+    run_dir = os.path.join(c.EXP_PATH, args.cfg.split('.')[0])
+
+    print('[INFO] config path: ' + config_path)
+    print('[INFO] results path: ' + run_dir)
+
+    # init results folder
+    if os.path.exists(run_dir) and not args.resume:
+        print('[WARNING] run dir exists but --resume flag not set')
+        if not args.skip_prompt:
+            _ = input('press enter to delete folder or ctrl-c to cancel... ')
+        shutil.rmtree(run_dir)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # build conf
+    cfg = config.load(config_path)
+    print('[INFO] loaded config {}: {}'.format(args.cfg, cfg.info))
+
+    # fill in missing values and replace auto values
+    setup_training_config(cfg, args.resume, run_dir)
+
+    # launch training
+    training_loop(cfg=cfg)
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    run(args)

@@ -1,0 +1,24 @@
+info: 'light e, light g, only face loss'
+task: 'ai_old.task.rec.rec.RecTask'
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqGanDataset'
+    batch_size: 32
+
+trainer:
+    type: 'ai_old.trainer.iit.NonGanRecTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adabelief'
+    hparams: 'small_gan'
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.simple.SimpleRecOnlyEncGen'
+
+loss:
+    type: 'ai_old.loss.imsim.ImsimLoss'
+    face:
+        weight: 1

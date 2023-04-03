@@ -1,0 +1,62 @@
+name: 'hair stylegan latent'
+trainer: 'ai_old.trainers.attrlatent.GenderAttrLatent'
+inferencer: 'ai_old.inf.attrlatent.GenderAttrLatent'
+
+dataset:
+    type: 'dualgaussian'
+    dims1: 512
+    dims2: 8
+    n_train: 1000
+    n_val: 10
+    n_inf: 10
+
+model:
+    g:
+        type: 'ai_old.models.g.stylegan.Generator'
+        path: 'stylegan/stylegan2-ffhq-config-f.pt'
+    t:
+        type: 'ai_old.models.t.mlp.SgMlpTransformer'
+        dims1: 8
+        hidden: [16, 32, 64, 128, 256, 512]
+        dims2: 1024
+        lr_mul: 1
+    seg:
+        type: 'ai_old.models.seg.deeplab.FaceSegmenter'
+        n_classes: 19
+        path: 'deeplab/deeplab_model.pth'
+    c:
+        type: 'ai_old.models.c.mlp.MlpClassifier'
+        hidden: [64]
+        exp: 4
+        dims_in: 512
+        dims_out: 1
+
+train:
+    epochs: 20
+    batch_size: 1
+    g_truncation: 0.7
+    transform_only_steps: 10 # decays by 1 every epoch
+    loss:
+        dualdir:
+            target1: 'delta-z/mtf/0.gz'
+            target2: 'delta-z/mtf/1.gz'
+        mag:
+            ymult: 0.1 # larger means delta-z is smaller on avg
+            weight: 1.
+        nonhair:
+            weight: 1.
+        hair:
+            weight: 1.
+        mouth:
+            weight: 1.
+        classifier:
+            weight: 1.
+
+    opt:
+        lr: 0.002
+        step_size: 10
+        gamma: 0.1
+
+inf:
+    batch_size: 1
+    g_truncation: 0.5

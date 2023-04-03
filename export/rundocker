@@ -1,0 +1,6 @@
+docker run -u $(id -u):$(id -g) --gpus=all -it --shm-size=32g \
+    -v $ASI_DATASETS:/home/asiu/datasets \
+    -v $ASI_DATA:/home/asiu/data \
+    -v $ASI_CODE:/home/asiu/code/asi \
+    -w /home/asiu/code/asi \
+    asi/export:latest bash

@@ -1,0 +1,25 @@
+*.pyc
+*.key
+*.png
+*.jpg
+*.jpeg
+*.log
+*.DS_Store
+*.dat
+*.ttf
+*.otf
+*.db
+*.min.css
+__pycache__/*
+devserver/js/node_modules/*
+devserver/js/package-lock.json
+devserver/data/*
+devserver/static/js/dist/*
+devserver/static/dist/*
+devserver/static/img/*
+experiment-dashboard/dist/*
+.idea
+
+# .dockerignore is created via symlinks in the different builddocker scripts, because they differ between server and
+# trainer container images.
+.dockerignore

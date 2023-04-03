@@ -1,0 +1,45 @@
+info: '[fg] no swap rec, excite g, even larger'
+task: 'ai_old.task.ult.UltTask'
+
+dataset:
+    type: 'ai_old.dataset.ult.FgUltDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.ult.NonGanUltTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.ult.UltModel'
+    real_enabled: true
+    gan_enabled: false
+    swap_enabled: true
+    swap_rec_enabled: false
+    z_dims: 512
+    nc_base: 32
+    nc_max: 512
+    f_n_layers: 1
+    g: 'excitation'
+
+loss:
+    type: 'ai_old.loss.ult.UltLoss'
+    real_rec_perceptual:
+        weight: 10
+    real_rec_face:
+        weight: 1
+    real_rec_pixel:
+        weight: 10
+    gender:
+        weight: 1
+    dz_mtf:
+        weight: 1
+    dz_ftm:
+        weight: 1
+    identity:
+        weight: 0.1

@@ -1,0 +1,1 @@
+docker build -f styleclip_dockerfile -t ahanu/asi:styleclip .

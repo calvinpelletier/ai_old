@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+
+src_path = os.path.join(c.ASI_DATA_PATH, 'z-to-gender/latents/{}.gz')
+with open()

@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn.functional as F
+from torch.distributions.uniform import Uniform
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from ai_old.util.pretrained import build_pretrained_sg2
+from ai_old.loss.perceptual.face import SoloFaceIdLoss
+from ai_old.loss.gender import GenderLoss
+from ai_old.util.etc import normalized_tensor_to_pil_img, create_img_grid, \
+    resize_imgs
+from tqdm import tqdm
+from ai_old.nn.models.lerp.gen import SimplestLerpGen
+import math
+
+
+FOLDER = '/home/asiu/data/lerp-gen-exp/2'
+SAMPLES_FOLDER = os.path.join(FOLDER, 'samples')
+LOSS_FOLDER = os.path.join(FOLDER, 'loss')
+
+HPARAMS = [
+    {
+        'n_layers': 4,
+        'lr_mul': 1.,
+        'opt': 'adam',
+        'lr': 0.001,
+    },
+]
+
+BATCH_SIZE = 8
+N_ITER = 200
+
+DELTA_WEIGHT = 2.
+FACE_WEIGHT = 1.
+CLASSIFY_WEIGHT = 6.
+
+DELTA_RANGE = (0.005, 0.01)
+FACE_RANGE = (0.2, 0.4)
+CLASSIFY_RANGE = (0.4, 0.6)
+Z_DIMS = 3
+
+
+class DylossSampler:
+    def __init__(self):
+        self.delta = Uniform(DELTA_RANGE[0], DELTA_RANGE[1])
+        self.face = Uniform(FACE_RANGE[0], FACE_RANGE[1])
+        self.classify = Uniform(CLASSIFY_RANGE[0], CLASSIFY_RANGE[1])
+        self.delta_idx = 0
+        self.face_idx = 1
+        self.classify_idx = 2
+
+    def sample(self):
+        return torch.cat([
+            self.delta.sample((BATCH_SIZE,)).unsqueeze(1),
+            self.face.sample((BATCH_SIZE,)).unsqueeze(1),
+            self.classify.sample((BATCH_SIZE,)).unsqueeze(1),
+        ], dim=1).to('cuda')
+
+    def create(self, delta, face, classify):
+        return torch.cat([
+            torch.tensor([[delta]]),
+            torch.tensor([[face]]),
+            torch.tensor([[classify]]),
+        ], dim=1).to('cuda')
+
+
+def run():
+    img_generator = build_pretrained_sg2()
+
+    w_path = os.path.join(FOLDER, 'w.npy')
+    if os.path.isfile(w_path):
+        w = torch.from_numpy(np.load(w_path)).to('cuda').to(torch.float32)
+    else:
+        z = torch.randn([1, 512], device='cuda')
+        w = img_generator.mapping(z, None, truncation_psi=0.8)
+        np.save(w_path, w.cpu().numpy())
+    w = w.repeat(BATCH_SIZE, 1, 1)
+
+    img_generator = img_generator.synthesis
+    img = img_generator(w, noise_mode='const')
+    img = resize_imgs(img, 256)
+    normalized_tensor_to_pil_img(img[0]).save(os.path.join(FOLDER, 'img.png'))
+    gender = torch.ones([BATCH_SIZE, 1], device='cuda')
+
+    face_loss_model = SoloFaceIdLoss(
+        256,
+        img,
+    ).eval().requires_grad_(False).to('cuda')
+
+    classify_loss_model = GenderLoss(
+        l2=False,
+    ).eval().requires_grad_(False).to('cuda')
+
+    z_sampler = DylossSampler()
+
+    for exp, hp in enumerate(HPARAMS):
+        G = SimplestLerpGen(
+            z_dims=Z_DIMS,
+            n_layers=hp['n_layers'],
+            lr_mul=hp['lr_mul'],
+        ).train().to('cuda')
+
+        assert hp['opt'] == 'adam'
+        opt = torch.optim.Adam(G.parameters(), lr=hp['lr'])
+
+        delta_losses = []
+        face_losses = []
+        classify_losses = []
+        total_losses = []
+        for i in tqdm(range(N_ITER)):
+            opt.zero_grad()
+
+            z = z_sampler.sample()
+
+            new_w = G(z, w)
+
+            new_img = img_generator(new_w, noise_mode='const')
+            new_img = resize_imgs(new_img, 256)
+
+            delta_loss = F.mse_loss(
+                F.mse_loss(new_w, w, reduction='none').mean(dim=(1, 2)),
+                z[:, z_sampler.delta_idx].detach(),
+            )
+
+            face_loss = F.mse_loss(
+                face_loss_model(new_img, avg_batch=False),
+                z[:, z_sampler.face_idx].detach(),
+            )
+
+            classify_loss =  F.mse_loss(
+                classify_loss_model(new_img, 1. - gender, avg_batch=False),
+                z[:, z_sampler.classify_idx].detach(),
+            )
+
+            total_loss = face_loss * FACE_WEIGHT + \
+                delta_loss * DELTA_WEIGHT + \
+                classify_loss * CLASSIFY_WEIGHT
+
+            delta_losses.append(delta_loss.item())
+            face_losses.append(face_loss.item())
+            classify_losses.append(classify_loss.item())
+            total_losses.append(total_loss.item())
+
+            total_loss.backward()
+            opt.step()
+
+        plt.plot(delta_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_delta.png'))
+        plt.clf()
+
+        plt.plot(face_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_face.png'))
+        plt.clf()
+
+        plt.plot(classify_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_classify.png'))
+        plt.clf()
+
+        plt.plot(total_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_total.png'))
+        plt.clf()
+
+        grid = []
+        for y in range(4):
+            face = FACE_RANGE[0] + (y / 3) * \
+                (FACE_RANGE[1] - FACE_RANGE[0])
+            row = []
+            for z in range(4):
+                classify = CLASSIFY_RANGE[0] + (z / 3) * \
+                    (CLASSIFY_RANGE[1] - CLASSIFY_RANGE[0])
+                for x in range(4):
+                    delta = DELTA_RANGE[0] + (x / 3) * \
+                        (DELTA_RANGE[1] - DELTA_RANGE[0])
+                    z = z_sampler.create(delta, face, classify)
+                    new_w = G(z, w)
+                    new_img = img_generator(new_w, noise_mode='const')
+                    new_img = resize_imgs(new_img, 256)
+                    row.append(normalized_tensor_to_pil_img(new_img[0]))
+
+                    debug = '({:.4f}, {:.4f}, {:.4f}): ({:.4f}, {:.4f}, {:.4f})'
+                    print(debug.format(
+                        delta,
+                        face,
+                        classify,
+                        F.mse_loss(new_w, w).item(),
+                        face_loss_model(new_img).item(),
+                        classify_loss_model(new_img, 1. - gender).item(),
+                    ))
+                row.append(None)
+            row = row[:-1] # remove last None
+            grid.append(row)
+        create_img_grid(grid, 256).save(
+            os.path.join(SAMPLES_FOLDER, f'{exp}.png'))
+
+
+if __name__ == '__main__':
+    run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

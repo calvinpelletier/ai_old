@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+import cv2
+import ai_old.dataset.filter_func as ff
+from ai_old.dataset import DatasetBase
+import math
+from ai_old.dataset.metadata_manager import MetadataManager
+
+
+class DS(DatasetBase):
+    def filter_func(self):
+        return ff.for_dataset('facegen')
+
+    def select_cols(self):
+        return [
+            'item_id',
+            'age_pred',
+            'ss_age_pred',
+        ]
+
+ds = DS().inference(no_data_loader=True)
+mm = MetadataManager.from_file()
+
+data = []
+for x in ds:
+    age1 = x['age_pred']
+    age2 = x['ss_age_pred']
+    age_diff = abs(age1 - age2)
+    scaled_age_diff = age_diff / \
+        (10. / (1. + math.exp(-0.15 * age1 + 4))) + 1.
+    data.append([
+        x['item_id'],
+        age1,
+        age2,
+        age_diff,
+        scaled_age_diff,
+    ])
+data.sort(key=lambda x: x[4], reverse=True)
+
+with open('/home/calvin/data/asi/dss_age_labels.csv', 'a') as f:
+    for id, age1, age2, age_diff, scaled_age_diff in data:
+        path1 = f'/home/calvin/datasets/facegen/{id}.png'
+        path2 = mm.get_write_path_for_data('facegen', id, 'dynamic_ss').abs_path
+        im1 = cv2.imread(path1)
+        im2 = cv2.imread(path2)
+        cv2.imshow('im1', im1)
+        cv2.imshow('im2', im2)
+        k = cv2.waitKey(0) & 0xFF
+        if k == 27:
+            # escape
+            break
+        elif k == ord('j'):
+            f.write('good,{},{},{},{},{:.2f}\n'.format(
+                id, age1, age2, age_diff, scaled_age_diff))
+        elif k == ord('f'):
+            f.write('bad,{},{},{},{},{:.2f}\n'.format(
+                id, age1, age2, age_diff, scaled_age_diff))

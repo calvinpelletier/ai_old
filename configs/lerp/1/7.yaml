@@ -1,0 +1,42 @@
+info: 'styleclip and less ss delta'
+task: 'ai_old.task.lerp.WPlusLerpTask'
+seed: 0
+fp32: false
+n_steps: 100000
+eval_freq: 10000
+
+gendered: true
+
+dataset:
+    type: 'ai_old.dataset.w_plus.RealInversionDataset'
+    imsize: 256
+    batch_size: 2
+    batch_gpu: 'auto'
+    xflip: false
+
+trainer:
+    type: 'ai_old.trainer.lerp.WPlusLerpTrainer'
+
+opt:
+    type: 'ranger'
+    lr: 0.5
+
+model:
+    type: 'ai_old.nn.models.lerp.dynamic.LerperAndGenerator'
+    lerper_type: 'levels'
+    levels: ['coarse', 'medium', 'fine']
+    final_activation: 'lrelu'
+    mult: 0.1
+    lr_mul: 0.01
+
+loss:
+    type: 'ai_old.loss.lerp.WPlusLerpLoss'
+    clip:
+        target_text: ['male face', 'female face']
+        weight: 1.
+    face:
+        weight: 0.1
+    delta:
+        weight: 0.8
+    ss_delta:
+        weight: 0.5

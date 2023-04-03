@@ -1,0 +1,42 @@
+name: '128x128 age classifier wrapping arcface'
+trainer: 'ai_old.trainers.classifier.ClassifierTrainer'
+inferencer: 'ai_old.inf.classifier.ClassifierInferencer'
+
+deps:
+    facerecog:
+        path: 'arcface/model_ir_se50.pth'
+        frozen: True
+        imsize: 112
+        dims_out: 512
+
+dataset:
+    type: 'ffhq-age'
+    name: 'itw-128'
+    split: 0.99
+    imsize: 128
+    aug:
+        flip: True
+
+model:
+    c:
+        type: 'ai_old.models.c.transfer.TransferMlpClassifier'
+        transfer: 'facerecog'
+        n_classes: 10
+        hidden: [512, 256, 128, 64]
+        norm: 'batch'
+        activation: 'prelu'
+        weight_norm: True
+
+train:
+    epochs: 10
+    batch_size: 32
+    stage2_at: 50000
+    opt:
+        type: 'ranger'
+        lr: 0.01
+
+eval:
+    metrics: ['loss', 'acc']
+
+inf:
+    batch_size: 32

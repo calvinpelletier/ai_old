@@ -1,0 +1,55 @@
+info: '256x256 e4e, from scratch, vgg percep'
+task: 'ai_old.task.rec.RecTask'
+seed: 0
+fp32: false
+n_steps: 25000000
+eval_freq: 40000
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.Ffhq256GanDataset'
+    imsize: 256
+    batch_size: 8
+    batch_gpu: 'auto'
+    xflip: true
+
+trainer:
+    type: 'ai_old.trainer.e4e_aae.E4eAaeTrainer'
+    aug:
+        enabled: true
+        type: 'ada'
+        target: 0.6
+        speed: 'auto'
+        freq: 4
+        augpipe: 'bgc' # blit, geom, color
+
+opt:
+    G:
+        type: 'adam'
+        hparams: 'auto-sg2'
+        sch: 'flat'
+    D:
+        type: 'adam'
+        hparams: 'auto-sg2'
+        sch: 'flat'
+
+model:
+    G:
+        type: 'ai_old.nn.models.ae.e4e.E4e'
+    D:
+        type: 'ai_old.nn.models.discriminate.fast_sg2.FastSg2Discriminator'
+        # TODO: pull imsize from dataset
+        imsize: 256
+        nc_base: 64
+        nc_max: 512
+        num_fp16_res: 4
+
+loss:
+    type: 'ai_old.loss.e4e_aae.E4eAaeLoss'
+    G:
+        rec:
+            weight: 10
+            perceptual_type: 'lpips_vgg'
+    D:
+        gp:
+            freq: 16
+            weight: 'auto'

@@ -1,0 +1,2 @@
+comparison_metric: 'master'
+base_image_columns: ['real', 'male', 'female']

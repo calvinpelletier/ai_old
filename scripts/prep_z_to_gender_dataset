@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+import os
+from shutil import copyfile
+import ai_old.constants as c
+
+
+# load labeler results
+ids = set()
+labels = []
+with open(c.LABELER_RESULTS, 'r') as f:
+    for line in f:
+        _, id, label = line.strip().split(',')
+        if id in ids:
+            print('duplicate: ' + id)
+            continue
+        ids.add(id)
+        if label == 'male' or label == 'female':
+            labels.append((id, '1' if label == 'male' else '0'))
+print(len(labels))
+
+# copy to datasets
+src_path = os.path.join(c.ASI_DATA_PATH, 'z-to-gender/x/{}.gz')
+x_path = os.path.join(c.ASI_DATASETS_PATH, 'z-to-gender', 'x', '{}.gz')
+y_path = os.path.join(c.ASI_DATASETS_PATH, 'z-to-gender', 'y', '{}.txt')
+for id, label in labels:
+    copyfile(src_path.format(id), x_path.format(id))
+    with open(y_path.format(id), 'w') as f:
+        f.write(label)

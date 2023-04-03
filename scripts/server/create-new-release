@@ -1,0 +1,11 @@
+set -e
+
+# Build the docker image locally.
+./scripts/server/builddocker
+
+# Tag it and push to our GCP Container Registry. This will be tagged as `latest` by default.
+# https://cloud.google.com/container-registry/docs/pushing-and-pulling
+docker tag ahanu/asi-rel-test gcr.io/hallowed-byte-293317/asi-rel-test
+docker push gcr.io/hallowed-byte-293317/asi-rel-test
+
+# TODO: Consider taking a commit hash and releasing at that point, instead of just using working directory?

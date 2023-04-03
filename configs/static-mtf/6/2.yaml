@@ -1,0 +1,46 @@
+info: 'static male-to-female gender swap using res g and patch d'
+task: 'ai_old.task.genderswap.static.StaticMtfTask'
+
+dataset:
+    type: 'ai_old.dataset.synthswap.pg.PairedGenderDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.gan.ConditionalGanTrainer'
+    n_epochs: 100
+
+opt:
+    type: 'adabelief'
+    hparams: 'small_gan'
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.iit.res.ResIIT'
+
+loss:
+    type: 'ai_old.loss.iit.gan.GuidedGLoss'
+    gan:
+        type: 'patch_hinge'
+        weight: 1
+    perceptual:
+        weight: 10
+    feat_match:
+        weight: 10
+
+# discriminator
+subtrainer:
+    type: 'ai_old.trainer.discriminator.FeatMatchPairedImgDiscriminatorTrainer'
+    name: 'd'
+
+    model:
+        type: 'ai_old.nn.models.discriminate.patch.MultiResPatchDiscriminator'
+
+    loss:
+        type: 'ai_old.loss.gan.DLoss'
+        gan:
+            type: 'patch_hinge'
+
+    opt:
+        type: 'adabelief'
+        hparams: 'small_gan'
+        sch: 'flat_cosine'

@@ -1,0 +1,52 @@
+info: 'ss only'
+task: 'ai_old.task.ult.SsOnlyBlendUltTask'
+
+dataset:
+    type: 'ai_old.dataset.ult.SsOnlyBlendUltDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.ult.NonGanBlendUltTrainer'
+    n_epochs: 800
+    model_ema: False
+    # initial_eval_freq: 10000
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.ult.BlendUltModel'
+    real_enabled: false
+    gan_enabled: false
+    swap_enabled: true
+    swap_rec_enabled: true
+    z_dims: 256
+    nc_base: 32
+    nc_max: 256
+    norm: 'instance'
+    f_n_layers: 1
+    g: 'style'
+    g_k_blend: 1
+
+loss:
+    type: 'ai_old.loss.ult.UltLoss'
+    dz_mtf:
+        weight: 1
+    dz_ftm:
+        weight: 1
+    identity:
+        weight: 1
+    male_rec_perceptual:
+        weight: 10
+    male_rec_face:
+        weight: 1
+    male_rec_pixel:
+        weight: 10
+    female_rec_perceptual:
+        weight: 10
+    female_rec_face:
+        weight: 1
+    female_rec_pixel:
+        weight: 10

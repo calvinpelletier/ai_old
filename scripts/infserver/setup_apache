@@ -1,0 +1,6 @@
+cp /home/asiu/code/asi/server/asi.conf /etc/apache2/sites-available/asi.conf
+a2ensite ai_old.conf
+service apache2 start
+service apache2 reload
+
+#vim /etc/apache2/ports.conf

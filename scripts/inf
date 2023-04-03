@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+import argparse
+import os
+from time import time
+import shutil
+from ai_old.util import config
+from ai_old.dataset import dataset
+from ai_old.inf.factory import build_inferencer
+import ai_old.constants as c
+import torch
+import numpy as np
+import random
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='asi inf')
+    parser.add_argument('--config', type=str, required=True,
+        help='path rel to configs folder')
+    parser.add_argument('--root', type=str, required=True,
+        help='root folder rel to ASI_DATA_PATH (unless --dataset)')
+    parser.add_argument('--input', type=str, default='x',
+        help='input path: <root>/<input>')
+    parser.add_argument('--output', type=str, default='y',
+        help='output path: <root>/<output>/<config>')
+    parser.add_argument('--gpus', type=str, default='0',
+        help='comma separated gpu ids')
+    parser.add_argument('--seed', type=int, default=0,
+        help='seed for random, np, torch')
+    parser.add_argument('--dataset', action='store_true',
+        help='root is rel to ASI_DATASET_PATH')
+    return parser.parse_args()
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def inf(conf, args, inputs, root_path):
+    # init output path
+    conf_path = args.config
+    if conf_path.endswith('.yaml'):
+        conf_path = conf_path.split('.')[0]
+    output_path = os.path.join(root_path, args.output, conf_path)
+    if os.path.exists(output_path):
+        print('[WARNING] output path exists and will be deleted and recreated')
+        _ = input('press enter to continue or ctrl-c to cancel... ')
+        shutil.rmtree(output_path)
+    os.makedirs(output_path, exist_ok=True)
+
+    # build inferencer
+    inferencer = build_inferencer(
+        conf,
+        # os.path.join(c.ASI_DATA_PATH, 'exp', args.id, 'saves/latest.pt'),
+        output_path,
+    )
+    print('[INFO] built {} inferencer'.format(conf.inferencer))
+
+    # inf loop
+    bs = conf.inf.batch_size
+    with torch.no_grad():
+        for i, data in enumerate(inputs):
+            start = time()
+            inferencer.inf(data)
+            batch_time = time() - start
+            print('[INFO] batch={}/{}, steps/s={:.2f}'.format(
+                i, len(inputs), inputs.batch_size / batch_time))
+    inferencer.done()
+    print('[INFO] done.')
+
+
+def run(args):
+    set_seed(args.seed)
+
+    # TODO: add support for sweeps
+    config_path = os.path.join(c.CONFIGS_FOLDER, args.config)
+    if not config_path.endswith('.yaml'):
+        config_path += '.yaml'
+    root_path = os.path.join(c.ASI_DATASETS_PATH, args.root) if args.dataset \
+        else os.path.join(c.ASI_DATA_PATH, args.root)
+
+    # load conf
+    conf = config.load(config_path)
+    print('[INFO] loaded config {}: {}'.format(args.config, conf.name))
+
+    # build dataset
+    input_path = os.path.join(root_path, args.input)
+    inputs = dataset.create(conf, is_inf=True, inf_path=input_path)
+    print('[INFO] loaded inputs: {}'.format(input_path))
+
+    inf(conf, args, inputs, root_path)
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    run(args)

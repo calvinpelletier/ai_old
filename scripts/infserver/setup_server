@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+# first install driver and reboot
+# sudo apt update && sudo apt install -y ubuntu-drivers-common && sudo ubuntu-drivers autoinstall && sudo reboot
+
+# docker and nvidia stuff
+sudo apt update
+sudo apt remove docker docker-engine docker.io containerd runc
+sudo apt install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common unzip
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+sudo gpasswd -a $USER docker
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID) && curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add - && curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+sudo apt update
+sudo apt install -y nvidia-docker2
+sudo systemctl restart docker
+
+# folders and env vars
+mkdir ~/datasets ~/data ~/.cache/torch ~/.cache/torch_extensions ~/.cache/dnnlib ~/.cache/clip
+echo "export ASI_CODE='$HOME/asi'" >> ~/.bashrc
+echo "export ASI_DATA='$HOME/data'" >> ~/.bashrc
+echo "export ASI_DATASETS='$HOME/datasets'" >> ~/.bashrc
+echo "export GOOGLE_APPLICATION_CREDENTIALS='$HOME/google_application_creds.json'" >> ~/.bashrc
+echo "alias asi='$HOME/asi/scripts/gcloud_run_docker'" >> ~/.bashrc
+source ~/.bashrc
+
+# TODO: auto download the necessary deps when running a training job
+gsutil cp gs://fp-test-bucket/deps/models/arcface/model_ir_se50.pth ~/data/models/arcface/model_ir_se50.pth
+gsutil cp gs://fp-test-bucket/deps/models/stylegan/official_g.pt ~/data/models/stylegan/official_g.pt
+gsutil cp gs://fp-test-bucket/deps/models/deeplab/deeplab_model.pth ~/data/models/deeplab/deeplab_model.pth
+gsutil cp gs://fp-test-bucket/deps/models/deeplab/R-101-GN-WS.pth.tar ~/data/models/deeplab/R-101-GN-WS.pth.tar
+# gsutil cp gs://fp-test-bucket/deps/models/inception/pt_inception-2015-12-05-6726825d.pth ~/data/models/inception/pt_inception-2015-12-05-6726825d.pth
+gsutil cp gs://fp-test-bucket/deps/models/aot/G.pt ~/data/models/aot/G.pt
+gsutil cp gs://fp-test-bucket/deps/models/e4e/e4e_ffhq_encode.pt ~/data/models/e4e/e4e_ffhq_encode.pt
+gsutil cp gs://fp-test-bucket/deps/models/inpaint/deepfillv2_WGAN_G_epoch40_batchsize4.pth ~/data/models/inpaint/deepfillv2_WGAN_G_epoch40_batchsize4.pth
+gsutil cp gs://fp-test-bucket/deps/models/dlib/shape_predictor_68_face_landmarks.dat ~/data/models/dlib/shape_predictor_68_face_landmarks.dat
+gsutil cp gs://fp-test-bucket/deps/exp/lerp/5/5/latest.pt ~/data/exp/lerp/5/5/saves/latest.pt
+gsutil cp gs://fp-test-bucket/deps/exp/outer-seg/0/1/latest.pkl ~/data/exp/outer-seg/0/1/saves/latest.pkl
+gsutil cp gs://fp-test-bucket/deps/exp/enc-lerp/0/6/latest.pt ~/data/exp/enc-lerp/0/6/saves/latest.pt
+gsutil cp gs://fp-test-bucket/deps/exp/rec/25/8/latest.pt ~/data/exp/rec/25/8/saves/latest.pt
+gsutil cp gs://fp-test-bucket/deps/env.zip ~/data/env.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/facegen.zip ~/datasets/facegen.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/ffhq-128.zip ~/datasets/ffhq-128.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/dynamic_ss.zip ~/datasets/supplemental/dynamic_ss.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/metadata ~/datasets/metadata
+# gsutil cp gs://fp-test-bucket/deps/datasets/manifolds.zip ~/datasets/manifolds.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/dynamic_ss_seg.zip ~/datasets/supplemental/dynamic_ss_seg.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/segmented_face.zip ~/datasets/supplemental/segmented_face.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/fg.zip ~/datasets/supplemental/fg.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/dynamic_ss_fg.zip ~/datasets/supplemental/dynamic_ss_fg.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/ibg.zip ~/datasets/supplemental/ibg.zip
+# gsutil cp gs://fp-test-bucket/deps/datasets/ss_ibg.zip ~/datasets/supplemental/ss_ibg.zip
+
+
+# after logging out and in again:
+# docker login && docker pull ahanu/asi:server

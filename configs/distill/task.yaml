@@ -1,0 +1,2 @@
+comparison_metric: l2_pixel
+base_image_columns: ['e4e_inv_256', 'e4e_inv_swap_256']

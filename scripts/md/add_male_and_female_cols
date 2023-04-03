@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+from ai_old.dataset import filter_func
+from ai_old.dataset import metadata_manager
+
+
+def good_confidence(x):
+    return x['gender_confidence'] > 0.9 and x['ss_gender_confidence'] > 0.9
+
+
+mm = metadata_manager.get()
+
+count = 0
+for val_dict in mm.read_all_data(filter_func.for_dataset("facegen")).values():
+    if val_dict['gender'] == 0. and val_dict['ss_gender'] == 1. and \
+            good_confidence(val_dict):
+        cols = {
+            'female_image': val_dict['face_image'],
+            'male_image': val_dict['dynamic_ss'],
+            'female_seg': val_dict['segmented_face'],
+            'male_seg': val_dict['dynamic_ss_seg'],
+            'female_fg': val_dict['fg'],
+            'male_fg': val_dict['dynamic_ss_fg'],
+            'female_ibg': val_dict['ibg'],
+            'male_ibg': val_dict['ss_ibg'],
+        }
+
+        mm.add_or_update_columns("facegen", val_dict["item_id"], **cols)
+        count += 1
+    elif val_dict['gender'] == 1. and val_dict['ss_gender'] == 0. and \
+            good_confidence(val_dict):
+        # Swap male and female.
+        cols = {
+            'female_image': val_dict['dynamic_ss'],
+            'male_image': val_dict['face_image'],
+            'female_seg': val_dict['dynamic_ss_seg'],
+            'male_seg': val_dict['segmented_face'],
+            'female_fg': val_dict['dynamic_ss_fg'],
+            'male_fg': val_dict['fg'],
+            'female_ibg': val_dict['ss_ibg'],
+            'male_ibg': val_dict['ibg'],
+        }
+        mm.add_or_update_columns("facegen", val_dict["item_id"], **cols)
+        count += 1
+    else:
+        print("Skipping item %s" % val_dict['item_id'])
+
+print(f'n good: {count}')
+print("Total rows in metadata: %d" % len(mm.read_all_data()))
+
+mm.save()

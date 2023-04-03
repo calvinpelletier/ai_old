@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+import argparse
+import ai_old.constants as c
+import random
+import ai_old.util.hparams as hparams
+from hashlib import sha256
+import os
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='hparam sweeper')
+    parser.add_argument('--config', type=str, required=True,
+        help='path to experiment folder rel to config folder')
+    parser.add_argument('--n', type=int, required=True,
+        help='num subexperiments to generate')
+    parser.add_argument('--clean', action='store_true',
+        help='delete old subexperiments')
+    return parser.parse_args()
+
+
+def hash_conf(conf):
+    return sha256(conf.encode('utf-8')).hexdigest()
+
+
+def build(args):
+    # load base config
+    # and prepare set of config hashes to prevent duplicates
+    base_folder = os.path.join(c.CONFIGS_FOLDER, args.config)
+    base_conf = None
+    hashes = set()
+    highest_id = -1
+    for filename in os.listdir(base_folder):
+        filepath = os.path.join(base_folder, filename)
+        if args.clean and filename != 'base.yaml':
+            os.remove(filepath)
+            continue
+        with open(filepath, 'r') as f:
+            if filename == 'base.yaml':
+                base_conf = f.readlines()
+            else:
+                hashes.add(hash_conf(f.read()))
+                highest_id = max(highest_id, int(filename.split('.')[0]))
+
+    # build args.n unique new configs
+    count = 0
+    new_confs = []
+    while True:
+        print('conf {}/{}'.format(count + 1, args.n))
+        # build single config
+        lines = []
+        for line in base_conf:
+            symbol = line.find('@')
+            if symbol == -1:
+                lines.append(line)
+                continue
+            tag = line[symbol+1:].strip()
+            # calculate val using <tag> function imported via ai_old.util.hparams
+            val = getattr(hparams, tag)()
+            lines.append(line[:symbol] + val + '\n')
+        new_conf = ''.join(lines)
+
+        # hash config to check for duplicates
+        hash = hash_conf(new_conf)
+        if hash not in hashes:
+            hashes.add(hash)
+            new_confs.append(new_conf)
+            count += 1
+        else:
+            print('generated a duplicate conf, trying again')
+
+        if count >= args.n:
+            break
+
+    # write new configs
+    for i, new_conf in enumerate(new_confs):
+        path = os.path.join(base_folder, '{}.yaml'.format(i + highest_id + 1))
+        with open(path, 'w') as f:
+            f.write(new_conf)
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    build(args)

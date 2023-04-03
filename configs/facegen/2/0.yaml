@@ -1,0 +1,48 @@
+info: 'xlight g and autoencoder d with gp'
+task: 'ai_old.task.facegen.light.LightFemaleFacegenTask'
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqFemaleGanDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.gan.GanTrainer'
+    n_epochs: 20
+
+opt:
+    type: 'adabelief'
+    hparams: 'small_gan'
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.facegen.light.ExtraLightFaceGenerator'
+    z_dims: 512
+
+loss:
+    type: 'ai_old.loss.gan.GLoss'
+    gan:
+        type: 'hinge'
+
+# discriminator
+subtrainer:
+    type: 'ai_old.trainer.discriminator.DiscriminatorTrainer'
+    name: 'd'
+
+    model:
+        type: 'ai_old.nn.models.discriminate.ae.AutoencoderDiscriminator'
+
+    loss:
+        type: 'ai_old.loss.discrim.AutoencoderRegularizedDLoss'
+        gan:
+            type: 'hinge'
+            weight: 1
+        rec:
+            weight: 1
+        gp:
+            freq: 4
+            weight: 10
+
+    opt:
+        type: 'adabelief'
+        hparams: 'small_gan'
+        sch: 'flat_cosine'

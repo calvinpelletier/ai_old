@@ -1,0 +1,1560 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import ai_old.constants as c
+import ai_old.dataset.filter_func as ff
+import numpy as np
+import torch
+from ai_old.dataset import DatasetBase
+from ai_old.dataset.metadata_manager import MetadataManager, fname_to_id
+from ai_old.nn.models.seg import Segmenter, SegAnalyzer, colorize
+from ai_old.util.etc import make_deterministic, normalized_tensor_to_pil_img, \
+    resize_imgs, create_img_row
+from torchvision.utils import save_image
+from torchvision.transforms import GaussianBlur
+from tqdm import tqdm
+from ai_old.util.factory import legacy_build_model_from_exp, build_model_from_exp
+from ai_old.util.age import unscale_age
+import ai_old.dataset.metadata_column_processor as mcp
+from ai_old.nn.models.inpaint.gated import GatedGenerator
+from PIL import Image
+import clip
+from ai_old.util.pretrained import build_pretrained_sg2
+from ai_old.nn.models.seg.outer_seg import get_masks
+from ai_old.util.outer import get_dilate_kernel, get_outer_boundary_mask
+import cv2
+from ai_old.nn.models.seg import binary_seg_to_img
+
+# TODO: fix
+# from ai_old.nn.models.facegen import FaceGenAndSeg, FaceGenerator
+
+
+# TODO: reduce duplicated code
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='metadata generator')
+    parser.add_argument('--reset_ffhq', action='store_true',
+                        help='''clear ffhq dataset from memory and regenerate
+                        from scratch (otherwise ffhq rows will remain and only
+                        the missing data will be filled in)''')
+    parser.add_argument('--reset_facegen', action='store_true',
+                        help='similar to reset_ffhq')
+    parser.add_argument('--reset_gaussian', action='store_true',
+                        help='similar to reset_ffhq')
+    parser.add_argument('--reset_celeba', action='store_true',
+                        help='similar to reset_ffhq')
+    return parser.parse_args()
+
+
+def add_ffhq128(mm):
+    dataset_name = "ffhq-128"
+
+    # TODO: make path usage more generic below - we shouldn't depend so
+    # directly on the "x" folder, maybe.
+    base_path = os.path.join(c.ASI_DATASETS_PATH, dataset_name)
+
+    for filename in os.listdir(os.path.join(base_path, "x")):
+        relpath_to_image = os.path.join(dataset_name, "x", filename)
+        item_id = fname_to_id(dataset_name, relpath_to_image)
+        mm.add_row(dataset_name, item_id, face_image=relpath_to_image)
+    mm.save()
+
+
+# adds a column for the path to the 512x512 face to all ffhq rows
+# requires dataset ffhq-128
+def add_ffhq512(mm):
+    DATASET_NAME = 'ffhq-128'
+    FFHQ_1024_PATH = os.path.join(c.ASI_DATASETS_PATH, 'ffhq-1024/x/{}.png')
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(DATASET_NAME)
+
+        def select_cols(self):
+            return {'item_id': 'item_id'}
+
+    dataset = DS().inference(no_data_loader=True)
+    for x in tqdm(dataset):
+        id = x['item_id']
+        pending_write = mm.get_write_path_for_data(
+            DATASET_NAME,
+            id,
+            'face_image_512',
+        )
+        im = Image.open(FFHQ_1024_PATH.format(id))
+        im = im.resize((512, 512), Image.LANCZOS)
+        im.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+    mm.save()
+
+
+def seg_ffhq(mm):
+    ########################
+    # Add segmenting data
+    #
+    # This will only run segmentation for files that don't already have it in
+    # metadata.
+    ########################
+    dataset_name = "ffhq-128"
+
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                "item_id": "item_id",
+                "face_image_512": "face_image_512",
+            }
+
+    dataset = ffhqds().inference(batch_size=8)
+    seg = Segmenter(imsize=128).to('cuda')
+    analyzer = SegAnalyzer().to('cuda')
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            x = batch['face_image_512'].to('cuda')
+            seg_results = seg(x, colorize=False)
+            infos = analyzer(seg_results)
+
+            for item_id, seg_result, info in zip(
+                batch["item_id"], seg_results, infos
+            ):
+                # condense the seg because otherwise it takes up way too much
+                # disk space
+                seg_result = torch.argmax(seg_result, dim=0)
+
+                pending_write = mm.get_write_path_for_data(
+                    dataset_name,
+                    item_id,
+                    "segmented_face",
+                )
+                np.save(
+                    pending_write.abs_path,
+                    seg_result.cpu().numpy().astype(np.uint8),
+                )
+                pending_write.mark_done()
+
+                # Add all segmentation analyzer results into metadata. We use
+                # the keys from the analyzer results directly as column names.
+                #
+                # Note .item() extracts the values out of tensors.
+                info_dict = {k: v.item() for k, v in info.items()}
+                mm.add_or_update_columns(dataset_name, item_id, **info_dict)
+    mm.save()
+
+
+def add_facegen(mm):
+    #################
+    # FaceGenAndSeg
+    #################
+    print("Clearing facegen dataset and creating from scratch.")
+    mm.clear_items(dataset="facegen")
+
+    # NOTE: I realized that we cant regenerate new disentangled latents because
+    # we've already hand labeled the age/gender some of them. So I'm loading
+    # disentangled latent vectors from disk and running them through the
+    # generator (didnt bother batching since we run this script so rarely)
+    LATENT_DIR = os.path.join(c.ASI_DATASETS_PATH, 'latents')
+    latent_files = sorted(os.listdir(LATENT_DIR))
+
+    DATASET_NAME = "facegen"
+    os.makedirs(os.path.join(c.ASI_DATASETS_PATH, DATASET_NAME), exist_ok=True)
+
+    model = FaceGenAndSeg(imsize=128).to('cuda')
+    analyzer = SegAnalyzer().to('cuda')
+    with torch.no_grad():
+        for latent_file in tqdm(latent_files):
+            z = torch.tensor(np.loadtxt(os.path.join(
+                LATENT_DIR, latent_file))).float().unsqueeze(0).cuda()
+            id = latent_file.split('.')[0]
+
+            y, s = model(z)
+            seg_infos = analyzer(s)
+            assert y.shape[0] == 1 and s.shape[0] == 1 and len(seg_infos) == 1
+            y, s, seg_info, z = y[0], s[0], seg_infos[0], z[0]
+
+            # condense the seg because otherwise it takes up way too much disk
+            # space
+            s = torch.argmax(s, dim=0)
+
+            # Save the image in a real dataset.
+            rel_im_path = os.path.join(DATASET_NAME, "%s.png" % id)
+            abs_im_path = os.path.join(c.ASI_DATASETS_PATH, rel_im_path)
+
+            # Save files to disk
+            save_image(
+                y,
+                abs_im_path,
+                normalize=True,
+                range=(-1, 1),
+            )
+
+            mm.add_row("facegen", id, face_image=rel_im_path)
+
+            pw1 = mm.get_write_path_for_data("facegen", id, "z")
+            np.save(pw1.abs_path, z.cpu().numpy())
+            pw1.mark_done()
+
+            pw2 = mm.get_write_path_for_data("facegen", id, "segmented_face")
+            np.save(pw2.abs_path, s.cpu().numpy().astype(np.uint8))
+            pw2.mark_done()
+
+            info_dict = {k: v.item() for k, v in seg_info.items()}
+            mm.add_or_update_columns("facegen", id, **info_dict)
+    mm.save()
+
+
+def add_ffhq_labels(mm):
+    labels_path = os.path.join(c.ASI_DATASETS_PATH, 'ffhq-128/labels.csv')
+    with open(labels_path, 'r') as f:
+        next(f) # skip header line
+        for line in tqdm(f):
+            parts = line.strip().split(',')
+            id = f'{int(parts[0]):05d}'
+
+            # gender
+            gender = parts[3]
+            assert gender in ['male', 'female']
+            gender = 1. if gender == 'male' else 0.
+
+            # age
+            age_range = parts[1]
+            _ = [int(x) for x in age_range.split('-')] # sanity
+
+            # sunglasses
+            glasses = parts[-1]
+            assert glasses in ['None', 'Normal', 'Dark', '-1']
+            has_sunglasses = glasses == 'Dark'
+
+            mm.add_or_update_columns(
+                'ffhq-128',
+                id,
+                gender=gender,
+                gender_confidence=1.,
+                age_range=age_range,
+                has_sunglasses=has_sunglasses,
+            )
+    mm.save()
+
+
+def predict_facegen_gender(mm):
+    dataset_name = 'facegen'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'item_id',
+                'face_image': 'face_image',
+                'dynamic_ss': 'dynamic_ss',
+            }
+
+    dataset = DS().inference(batch_size=32)
+    model = build_model_from_exp('gender-pred/0/1', verbose=False).to('cuda')
+    model.eval()
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            x1 = batch['face_image'].to('cuda')
+            x2 = batch['dynamic_ss'].to('cuda')
+            preds1 = model(x1)['gender_pred'].cpu()
+            preds2 = model(x2)['gender_pred'].cpu()
+
+            for id, pred1, pred2 in zip(batch['item_id'], preds1, preds2):
+                pred1 = torch.sigmoid(pred1)
+                pred2 = torch.sigmoid(pred2)
+                gender1 = torch.round(pred1).item()
+                gender2 = torch.round(pred2).item()
+                assert gender1 in [1., 0.] and gender2 in [1., 0.]
+                conf1 = pred1.item() if gender1 == 1. else 1. - pred1.item()
+                conf2 = pred2.item() if gender2 == 1. else 1. - pred2.item()
+                mm.add_or_update_columns(
+                    dataset_name,
+                    id,
+                    gender=gender1,
+                    gender_confidence=conf1,
+                    ss_gender=gender2,
+                    ss_gender_confidence=conf2,
+                )
+    mm.save()
+
+
+def predict_facegen_age(mm):
+    dataset_name = 'facegen'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'item_id',
+                'face_image': 'face_image',
+                'dynamic_ss': 'dynamic_ss',
+            }
+
+    dataset = DS().inference(batch_size=32)
+    model = build_model_from_exp('age-pred/0/0', verbose=False).to('cuda')
+    model.eval()
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            x1 = batch['face_image'].to('cuda')
+            x2 = batch['dynamic_ss'].to('cuda')
+            preds1 = model(x1)['age_pred'].cpu()
+            preds2 = model(x2)['age_pred'].cpu()
+
+            for id, pred1, pred2 in zip(batch['item_id'], preds1, preds2):
+                probs1 = torch.sigmoid(pred1)
+                probs2 = torch.sigmoid(pred2)
+                age1 = torch.sum(probs1 > 0.5).item()
+                age2 = torch.sum(probs2 > 0.5).item()
+                mm.add_or_update_columns(
+                    dataset_name,
+                    id,
+                    age_pred=age1,
+                    ss_age_pred=age2,
+                )
+    mm.save()
+
+
+def predict_z_age(mm):
+    dataset_name = 'facegen'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return ['item_id', 'z']
+
+    dataset = DS().inference(batch_size=32)
+    model = build_model_from_exp('z-age-pred/1/7', verbose=False).to('cuda')
+    model.eval()
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            preds = model(batch['z'].to('cuda'))['z_age_pred']
+
+            for id, pred in zip(batch['item_id'], preds):
+                probs = torch.sigmoid(pred)
+                scaled_age = torch.sum(probs > 0.5).item()
+                age = unscale_age(scaled_age)
+                mm.add_or_update_columns(
+                    dataset_name,
+                    id,
+                    z_age=age,
+                )
+    mm.save()
+
+
+def gen_synthswaps(mm):
+    ds_name = 'facegen'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(ds_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'item_id',
+                'z': 'z',
+                'gender': 'gender',
+            }
+
+    dataset = DS().inference(batch_size=8)
+
+    facegen = FaceGenerator(imsize=128).to('cuda')
+    facegen.eval()
+
+    model = legacy_build_model_from_exp(
+        'gender-lerp/1/3',
+        verbose=False,
+    ).to('cuda')
+    model.eval()
+
+    with torch.no_grad():
+        for i, data in tqdm(enumerate(dataset)):
+            out = model(data['z'].to('cuda'), data['gender'].to('cuda'))
+            static_ims = facegen(out['base_z2'], is_entangled=False)
+            dynamic_ims = facegen(out['z2'], is_entangled=False)
+
+            for id, s_im, d_im in zip(data['item_id'], static_ims, dynamic_ims):
+                # save static synthswap img in supplemental
+                pw = mm.get_write_path_for_data(ds_name, id, 'static_ss')
+                save_image(s_im, pw.abs_path, normalize=True, range=(-1, 1))
+                pw.mark_done()
+
+                # save dynamic synthswap img in supplemental
+                pw = mm.get_write_path_for_data(ds_name, id, 'dynamic_ss')
+                save_image(d_im, pw.abs_path, normalize=True, range=(-1, 1))
+                pw.mark_done()
+    mm.save()
+
+
+def seg_synthswaps(mm):
+    dataset_name = 'facegen'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'item_id',
+                'dynamic_ss': 'dynamic_ss',
+            }
+
+    dataset = DS().inference(batch_size=8)
+    seg = Segmenter(imsize=128).to('cuda')
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            x = batch['dynamic_ss'].to('cuda')
+            seg_results = seg(x, colorize=False)
+
+            for item_id, seg_result in zip(batch['item_id'], seg_results):
+                # condense the seg because otherwise it takes up way too much
+                # disk space
+                seg_result = torch.argmax(seg_result, dim=0)
+
+                pending_write = mm.get_write_path_for_data(
+                    dataset_name,
+                    item_id,
+                    'dynamic_ss_seg',
+                )
+                np.save(
+                    pending_write.abs_path,
+                    seg_result.cpu().numpy().astype(np.uint8),
+                )
+                pending_write.mark_done()
+    mm.save()
+
+
+def foreground_ffhq(mm):
+    dataset_name = 'ffhq-128'
+
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'face_image': 'face',
+                'segmented_face': 'seg',
+            }
+
+        # def get_column_processor_overrides(self):
+        #     return {
+        #         'face_image': mcp.CP(
+        #             inplace_method=mcp.read_image_without_norm,
+        #         )
+        #     }
+
+    dataset = ffhqds().inference(batch_size=8)
+    blur = GaussianBlur(7, sigma=1.)
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            face = batch['face'].to('cuda')
+            seg = batch['seg'].to('cuda').float()
+            seg = torch.unsqueeze(seg, 1)
+            # print(seg.shape)
+            mask = torch.clamp(seg, 0., 1.)
+            mask = blur(mask)
+            # print(mask)
+            # print(face)
+            imgs = face * mask
+
+            for id, img in zip(batch['id'], imgs):
+                pw = mm.get_write_path_for_data(dataset_name, id, 'fg')
+                save_image(img, pw.abs_path, normalize=True, range=(-1, 1))
+                pw.mark_done()
+
+    mm.save()
+
+
+def foreground_facegen(mm):
+    dataset_name = 'facegen'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'face_image': 'face',
+                'segmented_face': 'seg',
+                'dynamic_ss': 'ss_face',
+                'dynamic_ss_seg': 'ss_seg',
+            }
+
+    dataset = DS().inference(batch_size=8)
+    blur = GaussianBlur(7, sigma=1.)
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            face = batch['face'].to('cuda')
+            seg = batch['seg'].to('cuda').float()
+            seg = torch.unsqueeze(seg, 1)
+            mask = torch.clamp(seg, 0., 1.)
+            mask = blur(mask)
+            imgs = face * mask
+
+            ss_face = batch['ss_face'].to('cuda')
+            ss_seg = batch['ss_seg'].to('cuda').float()
+            ss_seg = torch.unsqueeze(ss_seg, 1)
+            ss_mask = torch.clamp(ss_seg, 0., 1.)
+            ss_mask = blur(ss_mask)
+            ss_imgs = ss_face * ss_mask
+
+            for id, img, ss_img in zip(batch['id'], imgs, ss_imgs):
+                pw = mm.get_write_path_for_data(dataset_name, id, 'fg')
+                save_image(img, pw.abs_path, normalize=True, range=(-1, 1))
+                pw.mark_done()
+
+                pw = mm.get_write_path_for_data(
+                    dataset_name, id, 'dynamic_ss_fg')
+                save_image(ss_img, pw.abs_path, normalize=True, range=(-1, 1))
+                pw.mark_done()
+
+    mm.save()
+
+
+def add_ult128(mm):
+    DATASET_NAME = 'ult-128'
+
+    class Ffhq(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset('ffhq-128')
+
+        def select_cols(self):
+            return {
+                'item_id': 'item_id',
+                'gender': 'gender',
+            }
+
+    class Facegen(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                'facegen',
+                # check that face_image and dynamic_ss are different genders
+                additional_filter=lambda x: \
+                    'male_image' in x and 'female_image' in x,
+            )
+
+        def select_cols(self):
+            return {
+                'item_id': 'item_id',
+                'gender': 'gender',
+                'ss_gender': 'ss_gender',
+            }
+
+    ffhq = Ffhq().inference_no_data_loader()
+    facegen = Facegen().inference_no_data_loader()
+    assert len(facegen) < len(ffhq)
+
+    for i in range(len(facegen)):
+        mm.add_or_update_columns(
+            DATASET_NAME,
+            str(i).zfill(5),
+            real_img=mm.read_single_value(
+                'ffhq-128', ffhq[i]['item_id'], 'face_image'),
+            # real_fg=mm.read_single_value(
+            #     'ffhq-128', ffhq[i]['item_id'], 'fg'),
+            # real_ibg=mm.read_single_value(
+            #     'ffhq-128', ffhq[i]['item_id'], 'ibg'),
+            real_gender=ffhq[i]['gender'].item(),
+            synth_img=mm.read_single_value(
+                'facegen', facegen[i]['item_id'], 'face_image'),
+            synth_gender=facegen[i]['gender'].item(),
+            ss_img=mm.read_single_value(
+                'facegen', facegen[i]['item_id'], 'dynamic_ss'),
+            ss_gender=facegen[i]['ss_gender'].item(),
+            # male_fg=mm.read_single_value(
+            #     'facegen', facegen[i]['item_id'], 'male_fg'),
+            # female_fg=mm.read_single_value(
+            #     'facegen', facegen[i]['item_id'], 'female_fg'),
+            # male_ibg=mm.read_single_value(
+            #     'facegen', facegen[i]['item_id'], 'male_ibg'),
+            # female_ibg=mm.read_single_value(
+            #     'facegen', facegen[i]['item_id'], 'female_ibg'),
+        )
+    mm.save()
+
+
+def dilate_fg_mask(mm, dataset_name, seg_col, out_col):
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                seg_col: 'seg',
+            }
+
+    dataset = ffhqds().inference(no_data_loader=True)
+    di_k = 16
+
+    with torch.no_grad():
+        for i, x in tqdm(enumerate(dataset)):
+            seg = x['seg'].float()
+            seg = torch.unsqueeze(seg, 0)
+            og_fg_mask = torch.clamp(seg, 0., 1.)
+
+            # dilate
+            fg_mask = og_fg_mask.numpy() * 255.
+            dilate_kernel = cv2.getStructuringElement(
+                cv2.MORPH_RECT, (di_k, di_k))
+            fg_mask = cv2.dilate(fg_mask, dilate_kernel)
+            fg_mask = np.uint8(fg_mask)
+
+            # fg_mask = torch.tensor()
+            # save_image(
+            #     [og_fg_mask, fg_mask],
+            #     f'/home/asiu/data/tmp/ibg/{i}.png',
+            # )
+
+            fg_mask = fg_mask / 255
+
+            pw = mm.get_write_path_for_data(
+                dataset_name,
+                x['id'],
+                out_col,
+            )
+            np.save(pw.abs_path, fg_mask)
+            pw.mark_done()
+
+    mm.save()
+
+
+def inpaint_ibg(mm, dataset_name, face_col, seg_col, fg_col, out_col):
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                face_col: 'face',
+                seg_col: 'seg',
+                fg_col: 'fg_mask',
+            }
+
+        def get_column_processor_overrides(self):
+            return {
+                face_col: mcp.CP(
+                    inplace_method=mcp.read_image_without_norm,
+                )
+            }
+
+    dataset = ffhqds().inference(batch_size=32)
+    model = GatedGenerator().cuda().eval()
+    should_dilate = True
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            face = batch['face'].to('cuda')
+
+            if should_dilate:
+                fg_mask = batch['fg_mask'].to('cuda').float()
+            else:
+                seg = batch['seg'].to('cuda').float()
+                seg = torch.unsqueeze(seg, 1)
+                fg_mask = torch.clamp(seg, 0., 1.)
+
+            bg_mask = 1. - fg_mask
+            masked = face * bg_mask
+            imgs = model(face, fg_mask)
+            imgs = masked + imgs * fg_mask
+
+            for id, img in zip(batch['id'], imgs):
+                pw = mm.get_write_path_for_data(dataset_name, id, out_col)
+                save_image(img, pw.abs_path)
+                pw.mark_done()
+
+    mm.save()
+
+
+def add_ffhq256(mm):
+    DATASET_NAME = 'ffhq-128'
+    FFHQ_1024_PATH = os.path.join(c.ASI_DATASETS_PATH, 'ffhq-1024/x/{}.png')
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(DATASET_NAME)
+
+        def select_cols(self):
+            return {'item_id': 'item_id'}
+
+    dataset = DS().inference_no_data_loader()
+    for x in tqdm(dataset):
+        id = x['item_id']
+        pending_write = mm.get_write_path_for_data(
+            DATASET_NAME,
+            id,
+            'face_image_256',
+        )
+        im = Image.open(FFHQ_1024_PATH.format(id))
+        im = im.resize((256, 256), Image.LANCZOS)
+        im.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+    mm.save()
+
+
+def add_gaussian_dataset(mm):
+    dataset_name = 'gaussian-512'
+    dataset_folder = os.path.join(c.ASI_DATASETS_PATH, dataset_name)
+    n = 512 + 64 # val set size + test set size (training set is generated live)
+    dims = 512
+
+    for i in range(n):
+        filename = f'{i:05d}.npy'
+        abspath = os.path.join(dataset_folder, filename)
+        gaussian = torch.randn([dims]).numpy()
+        np.save(abspath, gaussian)
+        relpath = os.path.join(dataset_name, filename)
+        item_id = fname_to_id(dataset_name, relpath)
+        mm.add_row(dataset_name, item_id, gaussian_seed=relpath)
+    mm.save()
+
+
+def add_soft_bg_mask(mm, imsize, out_col):
+    dataset_name = 'ffhq-128'
+
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'face_image_512': 'img',
+            }
+
+    dataset = ffhqds().inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+    segmenter = Segmenter(imsize=imsize, label='bg').to('cuda')
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            x = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+            segs = segmenter(x, colorize=False)
+
+            for id, seg in zip(batch['id'], segs):
+                pending_write = mm.get_write_path_for_data(
+                    dataset_name,
+                    id,
+                    out_col,
+                )
+                np.save(
+                    pending_write.abs_path,
+                    seg.cpu().numpy(),
+                )
+                pending_write.mark_done()
+
+                # Image.fromarray(
+                #     (seg * 256.).clamp(0, 255).to(torch.uint8).cpu().numpy(),
+                #     'L',
+                # ).save(f'/home/asiu/data/tmp/bg/{id}.png')
+    mm.save()
+
+
+def add_ffhq1024(mm):
+    DATASET_NAME = 'ffhq-128'
+    OG_FFHQ_1024_PATH = os.path.join(c.ASI_DATASETS_PATH, 'ffhq-1024/x/{}.png')
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(DATASET_NAME)
+
+        def select_cols(self):
+            return {'item_id': 'item_id'}
+
+    dataset = DS().inference_no_data_loader()
+    for x in tqdm(dataset):
+        id = x['item_id']
+        pending_write = mm.get_write_path_for_data(
+            DATASET_NAME,
+            id,
+            'face_image_1024',
+        )
+        os.rename(OG_FFHQ_1024_PATH.format(id), pending_write.abs_path)
+        pending_write.mark_done()
+    mm.save()
+
+
+def calc_clip_attrs(mm):
+    dataset_name = 'ffhq-128'
+    out_col = 'clip_attrs'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(dataset_name)
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'e4e_inv_1024': 'img',
+            }
+
+    ds = DS().inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+    clip_loss = ClipLoss(imsize=1024)
+    texts = [torch.cat([clip.tokenize(x)]).to('cuda') for x in c.CLIP_ATTRS]
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(ds)):
+            img = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+            results = []
+            for text in texts:
+                results.append(clip_loss(img, text))
+            results = torch.cat(results, dim=1)
+            for id, result in zip(batch['id'], results):
+                pending_write = mm.get_write_path_for_data(
+                    dataset_name,
+                    id,
+                    out_col,
+                )
+                np.save(
+                    pending_write.abs_path,
+                    result.cpu().numpy(),
+                )
+                pending_write.mark_done()
+    mm.save()
+
+
+def add_ffhq1024_e4e_inv(mm):
+    DATASET_NAME = 'ffhq-128'
+    OG_PATH = os.path.join(
+        c.ASI_DATASETS_PATH,
+        'ffhq-e4e-inv-1024/inversions/{:05d}.png',
+    )
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(DATASET_NAME)
+
+        def select_cols(self):
+            return {'item_id': 'item_id'}
+
+    dataset = DS().inference_no_data_loader()
+    for x in tqdm(dataset):
+        id = x['item_id']
+        pending_write = mm.get_write_path_for_data(
+            DATASET_NAME,
+            id,
+            'e4e_inv_1024',
+        )
+        os.rename(OG_PATH.format(int(id) + 1), pending_write.abs_path)
+        pending_write.mark_done()
+    mm.save()
+
+
+def add_ffhq1024_e4e_inv_latents(mm):
+    DATASET_NAME = 'ffhq-128'
+    latents = torch.load(os.path.join(
+        c.ASI_DATASETS_PATH,
+        'ffhq-e4e-inv-1024/latents.pt',
+    ))
+    print(latents.shape)
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(DATASET_NAME)
+
+        def select_cols(self):
+            return {'item_id': 'item_id'}
+
+    dataset = DS().inference_no_data_loader()
+    for x in tqdm(dataset):
+        id = x['item_id']
+        pending_write = mm.get_write_path_for_data(
+            DATASET_NAME,
+            id,
+            'e4e_inv_w_plus',
+        )
+        np.save(
+            pending_write.abs_path,
+            latents[int(id)].cpu().numpy(),
+        )
+        pending_write.mark_done()
+    mm.save()
+
+
+def add_ffhq1024_e4e_inv_clip_embedding(mm):
+    DATASET_NAME = 'ffhq-128'
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(DATASET_NAME)
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'e4e_inv_1024': 'img_path',
+            }
+
+        def get_column_processor_overrides(self):
+            return {
+                'e4e_inv_1024': mcp.no_op,
+            }
+
+    dataset = DS().inference_no_data_loader()
+    model, preprocess = clip.load('ViT-B/32', device='cuda', jit=False)
+
+    with torch.no_grad():
+        for x in tqdm(dataset):
+            id = x['id']
+            img_path = os.path.join(c.ASI_DATASETS_PATH, x['img_path'])
+
+            with Image.open(img_path) as im:
+                img = preprocess(im).unsqueeze(0).to('cuda')
+            embedding = model.encode_image(img).squeeze()
+
+            pending_write = mm.get_write_path_for_data(
+                DATASET_NAME,
+                id,
+                'e4e_inv_clip',
+            )
+            np.save(
+                pending_write.abs_path,
+                embedding.cpu().numpy(),
+            )
+            pending_write.mark_done()
+    mm.save()
+
+
+def add_e4e_inv_low_res(mm, res):
+    DATASET_NAME = 'ffhq-128'
+    E4E_INV_1024_PATH = os.path.join(
+        c.ASI_DATASETS_PATH,
+        c.SUPPLEMENTAL_DATASET_FOLDER_NAME,
+        'e4e_inv_1024',
+        DATASET_NAME,
+        '{}.png',
+    )
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(DATASET_NAME)
+
+        def select_cols(self):
+            return {'item_id': 'item_id'}
+
+    dataset = DS(False).inference_no_data_loader()
+    for x in tqdm(dataset):
+        id = x['item_id']
+        pending_write = mm.get_write_path_for_data(
+            DATASET_NAME,
+            id,
+            f'e4e_inv_{res}',
+        )
+        im = Image.open(E4E_INV_1024_PATH.format(id))
+        im = im.resize((res, res), Image.LANCZOS)
+        im.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+    mm.save()
+
+
+def add_fhbc_seg(mm, dataset_name, img_col, seg_col, seg_size):
+    assert dataset_name == 'ffhq-128', 'might want to change additional_filter'
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                dataset_name,
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                img_col: 'img',
+            }
+
+    dataset = ffhqds(False).inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+    segmenter = Segmenter(imsize=seg_size, label=None).to('cuda')
+    groups = [
+        ['skin', 'nose', 'glasses', 'l_eye', 'r_eye', 'l_brow', 'r_brow',
+            'l_ear', 'r_ear', 'mouth', 'u_lip', 'l_lip', 'earring', 'neck'],
+        ['hair', 'hat'],
+        ['bg'],
+        ['necklace', 'cloth'],
+    ]
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            imgs = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+            segs = segmenter(imgs, colorize=False, groups=groups)
+
+            # for debugging
+            imgs = resize_imgs(imgs, seg_size)
+
+            for id, img, seg in zip(batch['id'], imgs, segs):
+                seg = torch.argmax(seg, dim=0)
+
+                pending_write = mm.get_write_path_for_data(
+                    dataset_name,
+                    id,
+                    seg_col,
+                )
+                np.save(
+                    pending_write.abs_path,
+                    seg.cpu().numpy().astype(np.uint8),
+                )
+                pending_write.mark_done()
+
+                # DEBUGGING:
+                # img = normalized_tensor_to_pil_img(img)
+                # colorized = colorize(
+                #     seg.unsqueeze(0), needs_argmax=False)[0]
+                # canvas = Image.new(
+                #     'RGB',
+                #     (seg_size * 2, seg_size),
+                #     'black',
+                # )
+                # canvas.paste(img, (0, 0))
+                # canvas.paste(colorized, (seg_size, 0))
+                # canvas.save(f'/home/asiu/data/tmp/fhbc/{id}.png')
+    mm.save()
+
+
+def add_outer_1536(mm):
+    DATASET_NAME = 'ffhq-128'
+    COL_NAME = 'outer_1536'
+    OG_PATH = os.path.join(c.ASI_DATASETS_PATH, 'outer-1536/{}.png')
+
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                DATASET_NAME,
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {'item_id': 'item_id'}
+
+    dataset = DS(False).inference_no_data_loader()
+    for x in tqdm(dataset):
+        id = x['item_id']
+        pending_write = mm.get_write_path_for_data(
+            DATASET_NAME,
+            id,
+            COL_NAME,
+        )
+        os.rename(OG_PATH.format(id), pending_write.abs_path)
+        pending_write.mark_done()
+    mm.save()
+
+
+def add_resized_img_col(mm, ds_name, col_name, base_res, new_res):
+    BASE_IMG_PATH = os.path.join(
+        c.ASI_DATASETS_PATH,
+        c.SUPPLEMENTAL_DATASET_FOLDER_NAME,
+        col_name.format(base_res),
+        ds_name,
+        '{}.png',
+    )
+
+    assert ds_name == 'ffhq-128', 'might want to change additional_filter'
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                ds_name,
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {'item_id': 'id'}
+
+    dataset = DS(False).inference_no_data_loader()
+    for x in tqdm(dataset):
+        id = x['id']
+        pending_write = mm.get_write_path_for_data(
+            ds_name,
+            id,
+            col_name.format(new_res),
+        )
+        # if os.path.isfile(pending_write.abs_path):
+        #     pending_write.mark_done()
+        #     continue
+        im = Image.open(BASE_IMG_PATH.format(id))
+        im = im.resize((new_res, new_res), Image.LANCZOS)
+        im.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+    mm.save()
+
+
+def add_sera_to_ffhq(mm):
+    ds = 'ffhq-128'
+    folder_1024 = os.path.join(c.ASI_DATA_PATH, 'sera/aligned/1024')
+
+    for fname in os.listdir(folder_1024):
+        id = '{:05d}'.format(80000 + int(fname.split('.')[0]))
+        print(id)
+
+        img_1024 = Image.open(os.path.join(folder_1024, fname))
+        img_512 = img_1024.resize((512, 512), Image.LANCZOS)
+        img_256 = img_1024.resize((256, 256), Image.LANCZOS)
+        img_128 = img_1024.resize((128, 128), Image.LANCZOS)
+
+        relpath = f'sera-128/{id}.png'
+        img_128.save(os.path.join(c.ASI_DATASETS_PATH, relpath))
+        mm.add_row(ds, id, face_image=relpath, gender=1.)
+
+        pending_write = mm.get_write_path_for_data(ds, id, 'face_image_256')
+        img_256.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+
+        pending_write = mm.get_write_path_for_data(ds, id, 'face_image_512')
+        img_512.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+
+        pending_write = mm.get_write_path_for_data(ds, id, 'face_image_1024')
+        img_1024.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+
+    mm.save()
+
+
+def add_celeba(mm):
+    ds = 'celeba'
+    base_path = os.path.join(c.ASI_DATASETS_PATH, ds)
+    attr_path = os.path.join(base_path, 'CelebAMask-HQ-attribute-anno.txt')
+    img_dir = os.path.join(base_path, 'CelebA-HQ-img')
+
+    gender_idx = 20
+    fname_to_gender = {}
+    with open(attr_path, 'r') as f:
+        next(f)
+        next(f)
+        for line in f:
+            fname, attrs = line.strip().split('  ')
+            attrs = attrs.split(' ')
+            gender = int(attrs[gender_idx])
+            assert gender in [1, -1]
+            if gender == -1:
+                gender = 0
+            fname_to_gender[fname] = gender
+
+    for fname in os.listdir(img_dir):
+        id = '{:05d}'.format(int(fname.split('.')[0]))
+        print(id)
+
+        gender = fname_to_gender[fname]
+
+        img_1024 = Image.open(os.path.join(img_dir, fname))
+        img_512 = img_1024.resize((512, 512), Image.LANCZOS)
+        img_256 = img_1024.resize((256, 256), Image.LANCZOS)
+        img_128 = img_1024.resize((128, 128), Image.LANCZOS)
+
+        relpath = f'celeba/128x128/{id}.png'
+        img_128.save(os.path.join(c.ASI_DATASETS_PATH, relpath))
+        mm.add_row(ds, id, face_image=relpath, gender=gender)
+
+        pending_write = mm.get_write_path_for_data(ds, id, 'face_image_256')
+        img_256.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+
+        pending_write = mm.get_write_path_for_data(ds, id, 'face_image_512')
+        img_512.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+
+        pending_write = mm.get_write_path_for_data(ds, id, 'face_image_1024')
+        img_1024.save(pending_write.abs_path, 'PNG')
+        pending_write.mark_done()
+
+    mm.save()
+
+
+# def add_attributes(mm):
+#     class DS(DatasetBase):
+#         def filter_func(self):
+#             return ff.for_dataset(ds_name)
+#
+#         def select_cols(self):
+#             return {'item_id': 'id'}
+#
+#     dataset = DS(False).inference_no_data_loader()
+#     with torch.no_grad():
+#         clip_loss = ClipLoss('cuda')
+#         text_encs = clip_loss.prep_texts(c.CLIP_ATTRS)
+#         for i, batch in tqdm(enumerate(ds)):
+#             img = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+#             results = []
+#             for text in texts:
+#                 results.append(clip_loss(img, text))
+#             results = torch.cat(results, dim=1)
+#             for id, result in zip(batch['id'], results):
+#                 pending_write = mm.get_write_path_for_data(
+#                     dataset_name,
+#                     id,
+#                     out_col,
+#                 )
+#                 np.save(
+#                     pending_write.abs_path,
+#                     result.cpu().numpy(),
+#                 )
+#                 pending_write.mark_done()
+#     mm.save()
+
+
+def add_seg(mm, src_col, segsize, out_col):
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                'ffhq-128',
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                src_col: 'img',
+            }
+
+    dataset = ffhqds(False).inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+    segmenter = Segmenter(imsize=segsize).to('cuda')
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            imgs = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+            segs = segmenter(imgs, colorize=False, softmax=True, groups=None)
+
+            # for debugging
+            imgs = resize_imgs(imgs, segsize)
+
+            for id, img, seg in zip(batch['id'], imgs, segs):
+                seg = torch.argmax(seg, dim=0)
+
+                pending_write = mm.get_write_path_for_data(
+                    'ffhq-128',
+                    id,
+                    out_col,
+                )
+                np.save(
+                    pending_write.abs_path,
+                    seg.cpu().numpy().astype(np.uint8),
+                )
+                pending_write.mark_done()
+
+                # DEBUGGING:
+                img = normalized_tensor_to_pil_img(img)
+                colorized = colorize(
+                    seg.unsqueeze(0), needs_argmax=False)[0]
+                canvas = Image.new(
+                    'RGB',
+                    (segsize * 2, segsize),
+                    'black',
+                )
+                canvas.paste(img, (0, 0))
+                canvas.paste(colorized, (segsize, 0))
+                canvas.save(f'/home/asiu/data/tmp/seg/{id}.png')
+    mm.save()
+
+
+def swap_e4e(mm):
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                'ffhq-128',
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'e4e_inv_w_plus': 'w',
+                'gender': 'gender',
+            }
+    dataset = DS(False).inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+
+    g = build_pretrained_sg2().synthesis.to('cuda')
+    g.eval()
+    f = build_model_from_exp('lerp/5/5', 'G', return_cfg=False).f.to('cuda')
+    f.eval()
+
+    for batch in tqdm(dataset):
+        ws = batch['w'].to('cuda').to(torch.float32)
+        genders = batch['gender'].to('cuda').to(torch.float32)
+        genders = genders.unsqueeze(1)
+
+        swap_ws = f(ws, genders, magnitude=1.)
+        swap_imgs = g(swap_ws, noise_mode='const')
+        swap_imgs_256 = resize_imgs(swap_imgs, 256)
+        swap_imgs_128 = resize_imgs(swap_imgs, 128)
+
+        # for id, swap_w in zip(batch['id'], swap_ws):
+        for id, swap_w, swap_img_256, swap_img_128 in zip(
+            batch['id'],
+            swap_ws,
+            swap_imgs_256,
+            swap_imgs_128,
+        ):
+            pending_write = mm.get_write_path_for_data(
+                'ffhq-128',
+                id,
+                'e4e_inv_swap_256',
+            )
+            normalized_tensor_to_pil_img(swap_img_256).save(
+                pending_write.abs_path, 'PNG')
+            pending_write.mark_done()
+
+            pending_write = mm.get_write_path_for_data(
+                'ffhq-128',
+                id,
+                'e4e_inv_swap_128',
+            )
+            normalized_tensor_to_pil_img(swap_img_128).save(
+                pending_write.abs_path, 'PNG')
+            pending_write.mark_done()
+
+            pending_write = mm.get_write_path_for_data(
+                'ffhq-128',
+                id,
+                'e4e_inv_swap_w_plus',
+            )
+            np.save(pending_write.abs_path, swap_w.cpu().numpy())
+            pending_write.mark_done()
+
+    mm.save()
+
+
+def add_inpaint_mask_512(mm):
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                'ffhq-128',
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'outer_512': 'img',
+            }
+
+    dataset = ffhqds(False).inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+    segmenter = Segmenter(imsize=512, label=None).to('cuda')
+    groups = [
+        ['skin', 'nose', 'glasses', 'l_eye', 'r_eye', 'l_brow', 'r_brow',
+            'l_ear', 'r_ear', 'mouth', 'u_lip', 'l_lip', 'earring', 'neck'],
+        ['hair', 'hat'],
+        ['bg'],
+        ['necklace', 'cloth'],
+    ]
+
+    inner_mask = get_masks(512, int(512 / 1.5))[0].cuda()
+    dilate_kernel = get_dilate_kernel(512)
+    outer_boundary_mask = get_outer_boundary_mask(512).cuda()
+    inv_outer_boundary_mask = 1. - outer_boundary_mask
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            imgs = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+            segs = segmenter(imgs, colorize=False, groups=groups)
+
+            for id, seg in zip(batch['id'], segs):
+                seg = torch.argmax(seg, dim=0)
+
+                face = seg == 0
+                hair = seg == 1
+                facehair = torch.bitwise_or(face, hair).float()
+                inner_gan_mask = facehair * inner_mask
+
+                dilated_facehair = cv2.dilate(
+                    facehair.cpu().numpy() * 255., dilate_kernel)
+                dilated_facehair = torch.tensor(dilated_facehair / 255.).cuda()
+                dilated_facehair = (dilated_facehair > 0.5).float()
+                inv_inner_gan_mask = 1. - inner_gan_mask
+                inpaint_mask = dilated_facehair * inv_inner_gan_mask * \
+                    inv_outer_boundary_mask
+
+                inpaint_mask_img = Image.fromarray(
+                    inpaint_mask.cpu().numpy().astype(np.uint8) * 255,
+                    mode='L',
+                ).convert('1')
+
+                pending_write = mm.get_write_path_for_data(
+                    'ffhq-128',
+                    id,
+                    'inpaint_mask_512',
+                )
+                inpaint_mask_img.save(pending_write.abs_path)
+                pending_write.mark_done()
+    mm.save()
+
+
+def add_fg_mask_256(mm):
+    class ffhqds(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                'ffhq-128',
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'face_image_512': 'img',
+            }
+
+    dataset = ffhqds(False).inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+    segmenter = Segmenter(imsize=256).to('cuda')
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataset)):
+            imgs = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+            segs = segmenter(imgs, colorize=False, softmax=True)
+
+            for id, seg in zip(batch['id'], segs):
+                seg = torch.argmax(seg, dim=0)
+                fg_mask = torch.clamp(seg, 0., 1.)
+
+                mask_img = Image.fromarray(
+                    fg_mask.cpu().numpy().astype(np.uint8) * 255,
+                    mode='L',
+                ).convert('1')
+
+                pw = mm.get_write_path_for_data(
+                    'ffhq-128',
+                    id,
+                    'fg_mask_256',
+                )
+                mask_img.save(pw.abs_path)
+                pw.mark_done()
+    mm.save()
+
+
+def add_enc_4x4(mm):
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset(
+                'ffhq-128',
+                additional_filter=lambda x: int(x['item_id']) < 80000,
+            )
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'e4e_inv_256': 'img',
+                'e4e_inv_w_plus': 'w',
+                'gender': 'gender',
+            }
+    dataset = DS(False).inference(batch_size=8, seed=0, rank=0, num_gpus=1)
+
+    lerp_and_gen = build_model_from_exp(
+        'lerp/5/5',
+        'G',
+        return_cfg=False,
+    ).eval().requires_grad_(False).to('cuda')
+
+    ae = build_model_from_exp(
+        'rec/25/8',
+        'G_ema',
+        return_cfg=False,
+    ).eval().requires_grad_(False).to('cuda')
+
+    max_mag = 1.5
+    n_mags = 8
+    mags = torch.tensor(
+        np.linspace(0., max_mag, num=n_mags),
+        device='cuda',
+    ).to(torch.float32)
+
+    with torch.no_grad():
+        for batch in tqdm(dataset):
+            imgs = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+            genders = batch['gender'].to('cuda').to(
+                torch.float32).unsqueeze(1)
+            ws = batch['w'].to('cuda').to(torch.float32)
+
+            for id, img, gender, w in zip(batch['id'], imgs, genders, ws):
+                target_w = lerp_and_gen.f(
+                    w.unsqueeze(0).repeat(n_mags, 1, 1),
+                    gender.unsqueeze(0).repeat(n_mags, 1),
+                    magnitude=mags,
+                )
+                target_img = lerp_and_gen.g(target_w)
+                target_enc = ae.e(target_img)
+
+                pw = mm.get_write_path_for_data(
+                    'ffhq-128',
+                    id,
+                    'enc_4x4_target',
+                )
+                torch.save(target_enc.cpu(), pw.abs_path)
+                pw.mark_done()
+
+                # tmp
+                # create_img_row([
+                #     normalized_tensor_to_pil_img(x) for x in target_img
+                # ], 256).save(f'/home/asiu/data/tmp/asdf4/{id}.png')
+    mm.save()
+
+
+if __name__ == '__main__':
+    make_deterministic()
+    args = parse_args()
+    mm = MetadataManager.from_file(create_if_nonexistent=True)
+
+    if args.reset_ffhq:
+        add_ffhq128(mm)
+    if args.reset_facegen:
+        add_facegen(mm)
+    if args.reset_gaussian:
+        add_gaussian_dataset(mm)
+    if args.reset_celeba:
+        add_celeba(mm)
+    # add_ffhq512(mm)
+    # seg_ffhq(mm)
+    # add_ffhq_labels(mm)
+    # gen_synthswaps(mm)
+    # predict_facegen_gender(mm)
+    # predict_facegen_age(mm)
+    # predict_z_age(mm)
+    # seg_synthswaps(mm)
+    # foreground_ffhq(mm)
+    # foreground_facegen(mm)
+    # add_ult128(mm)
+    # dilate_fg_mask(mm, 'ffhq-128', 'segmented_face', 'dilated_fg_mask')
+    # dilate_fg_mask(mm, 'facegen', 'segmented_face', 'dilated_fg_mask')
+    # dilate_fg_mask(mm, 'facegen', 'dynamic_ss_seg', 'ss_dilated_fg_mask')
+    # inpaint_ibg(mm, 'ffhq-128', 'face_image', 'segmented_face',
+        # 'dilated_fg_mask', 'ibg')
+    # inpaint_ibg(mm, 'facegen', 'face_image', 'segmented_face',
+    #     'dilated_fg_mask', 'ibg')
+    # inpaint_ibg(mm, 'facegen', 'dynamic_ss', 'dynamic_ss_seg',
+    #     'ss_dilated_fg_mask', 'ss_ibg')
+    # add_ffhq256(mm)
+    # add_soft_bg_mask(mm, 128, 'soft_bg_mask')
+    # add_soft_bg_mask(mm, 256, 'soft_bg_mask_256')
+    # add_ffhq1024(mm)
+    # add_ffhq1024_e4e_inv(mm)
+    # add_ffhq1024_e4e_inv_latents(mm)
+    # calc_clip_attrs(mm)
+    # add_ffhq1024_e4e_inv_clip_embedding(mm)
+    # add_e4e_inv_low_res(mm, 256)
+    # add_e4e_inv_low_res(mm, 128)
+    # add_fhbc_seg(mm, 'ffhq-128', 'e4e_inv_1024', 'fhbc_128', 128)
+    # add_outer_1536(mm)
+    # add_resized_img_col(mm, 'ffhq-128', 'outer_{}', 1536, 384)
+    # add_resized_img_col(mm, 'ffhq-128', 'outer_{}', 1536, 192)
+    # add_resized_img_col(mm, 'ffhq-128', 'outer_{}', 1536, 512)
+    # add_fhbc_seg(mm, 'ffhq-128', 'outer_1536', 'outer_fhbc_seg_192', 192)
+    # add_fhbc_seg(mm, 'ffhq-128', 'outer_1536', 'outer_fhbc_seg_384', 384)
+    # add_sera_to_ffhq(mm)
+    # add_seg(mm, 'e4e_inv_1024', 128, 'e4e_inv_seg_128')
+    # add_seg(mm, 'outer_1536', 192, 'outer_seg_192')
+    # swap_e4e(mm)
+    # add_inpaint_mask_512(mm)
+    # add_fg_mask_256(mm)
+    add_enc_4x4(mm)
+
+    # mm.save()
+    print("Num items in metadata: ", mm.num_items())

@@ -1,0 +1,60 @@
+info: 'aae, 128x128, simple w e, low res style g'
+task: 'ai_old.task.rec.RecTask'
+seed: 0
+fp32: false
+n_steps: 25000000
+# eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqGanDataset'
+    imsize: 128
+    batch_size: 32
+    batch_gpu: 'auto'
+    xflip: true
+
+trainer:
+    type: 'ai_old.trainer.aae.AaeTrainer'
+    aug:
+        enabled: true
+        type: 'ada'
+        target: 0.6
+        speed: 'auto'
+        freq: 4
+        augpipe: 'bgc' # blit, geom, color
+
+opt:
+    G:
+        type: 'adabelief'
+        hparams: 'small_gan'
+        sch: 'flat'
+    D:
+        type: 'adabelief'
+        hparams: 'small_gan'
+        sch: 'flat'
+
+model:
+    G:
+        type: 'ai_old.nn.models.ae.style.StyleAutoencoder'
+        e_type: 'simple_w'
+        e_nc_base: 64
+        e_norm_first_block: False
+        e_use_fancy_blocks: True
+        e_n_layers_per_res: [2, 4, 8, 4, 2]
+        g_type: 'low_res_style'
+        g_nc_base: 16
+        g_noise_mode: 'const'
+    D:
+        type: 'ai_old.nn.models.discriminate.fast_sg2.FastSg2Discriminator'
+        nc_base: 32
+        num_fp16_res: 4
+
+loss:
+    type: 'ai_old.loss.aae.SimpleAaeLoss'
+    G:
+        rec:
+            weight: 10
+            perceptual_type: 'lpips_alex'
+    D:
+        gp:
+            freq: 16
+            weight: 'auto'

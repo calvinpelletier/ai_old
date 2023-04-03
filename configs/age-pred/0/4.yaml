@@ -1,0 +1,23 @@
+info: 'predict age given a face image'
+task: 'ai_old.task.classify.age.AgeClassification'
+
+dataset:
+    type: 'ai_old.dataset.classify.age.ImgAgeClassificationDataset'
+    batch_size: 32
+    split: 0.99
+
+model:
+    type: 'ai_old.nn.models.classify.age.ImgAgeClassifier'
+    hidden: [512, 256, 128]
+
+loss:
+    type: 'ai_old.loss.coral.CoralLoss'
+    pred_key: 'age_pred'
+    target_key: 'age'
+
+trainer:
+    type: 'ai_old.trainer.classify.img.ImgAgeClassificationTrainer'
+    opt: 'ranger'
+    lr: 0.01
+    sch: 'flat_cosine'
+    n_epochs: 40

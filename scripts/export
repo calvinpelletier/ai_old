@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+import argparse
+import os
+from time import time
+import shutil
+from ai_old.util import config
+from ai_old.dataset import dataset
+from ai_old.inf.factory import build_inferencer
+import ai_old.constants as c
+import torch
+import numpy as np
+import random
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='asi inf')
+    parser.add_argument('--id', type=str, required=True,
+        help='config id')
+    parser.add_argument('--path', type=str,
+        default='tmp.onnx',
+        help='path rel to ASI_DATA_PATH')
+    return parser.parse_args()
+
+
+def inf(conf, args, id, inputs):
+    # init output path
+    base_path = c.ASI_DATASETS_PATH if args.dataset else c.ASI_DATA_PATH
+    output_path = os.path.join(base_path, args.root, args.output, id)
+    if os.path.exists(output_path):
+        print('[WARNING] output path exists and will be deleted and recreated')
+        # _ = input('press enter to continue or ctrl-c to cancel... ')
+        shutil.rmtree(output_path)
+    os.makedirs(output_path, exist_ok=True)
+
+    # build inferencer
+    inferencer = build_inferencer(
+        conf,
+        os.path.join(c.ASI_DATA_PATH, 'exp', args.id, 'saves/latest.pt'),
+        None,
+    )
+    print('[INFO] built {} inferencer'.format(conf.inferencer))
+
+    # inf loop
+    bs = conf.inf.batch_size
+    with torch.no_grad():
+        for i, data in enumerate(inputs):
+            start = time()
+            inferencer.inf(data)
+            batch_time = time() - start
+            print('[INFO] batch={}/{}, steps/s={:.2f}'.format(
+                i, len(inputs), inputs.batch_size / batch_time))
+    print('[INFO] done.')
+
+
+def run(args):
+    set_seed(args.seed)
+
+    # build dataset
+    base_path = c.ASI_DATASETS_PATH if args.dataset else c.ASI_DATA_PATH
+    input_path = os.path.join(base_path, args.root, args.input)
+    if args.sweep:
+        conf = config.load(c.CONFIG_PATH.format(args.id + '_0'))
+    else:
+        conf = config.load(c.CONFIG_PATH.format(args.id))
+    print('[INFO] loaded config {}: {}'.format(args.id, conf.name))
+    inputs = dataset.create(conf, is_inf=True, inf_path=input_path)
+    print('[INFO] loaded inputs: {}'.format(input_path))
+
+    if args.sweep:
+        for filename in os.listdir(c.CONFIGS_FOLDER):
+            if filename.startswith('{}_'.format(args.id)):
+                id = filename.split('.')[0]
+                print('[INFO] id: ' + id)
+                inf(config.load(c.CONFIG_PATH.format(id)), args, id, inputs)
+    else:
+        inf(conf, args, args.id, inputs)
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    run(args)

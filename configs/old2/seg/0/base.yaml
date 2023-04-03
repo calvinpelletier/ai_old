@@ -1,0 +1,20 @@
+name: 'seg faces with deeplab'
+inferencer: 'ai_old.inf.segmenter.Segmenter'
+
+deps:
+    seg:
+        path: 'deeplab/deeplab_model.pth'
+        frozen: True
+
+dataset:
+    type: 'rgb'
+    imsize: 256
+
+model:
+    seg:
+        type: 'dep'
+        dep: 'seg'
+        n_classes: 19
+
+inf:
+    batch_size: 32

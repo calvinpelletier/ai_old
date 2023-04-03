@@ -1,0 +1,25 @@
+info: 'gan output is random ffhq img'
+task: 'ai_old.task.genderswap.static.StaticMtfTask'
+
+dataset:
+    type: 'ai_old.dataset.synthswap.pg.PairedGenderDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.debug.RandomRealFaceCganTrainer'
+    n_epochs: 10
+    initial_eval_freq: 100000
+
+# not used
+opt:
+    type: 'adabelief'
+    hparams: 'small_gan'
+    sch: 'flat_cosine'
+
+# not used
+model:
+    type: 'ai_old.nn.models.iit.res.ResIIT'
+
+# just outputs 0
+loss:
+    type: 'ai_old.loss.debug.NullLoss'

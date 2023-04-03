@@ -1,0 +1,16 @@
+name: 'face segmenter'
+
+dataset:
+    type: 'celebaseg'
+    name: 'seg'
+    res: 513
+
+model:
+    type: 'seg'
+    seg:
+        type: 'ai_old.models.seg.deeplab.FaceSegmenter'
+        n_classes: 19
+        path: 'deeplab/deeplab_model.pth'
+
+inf:
+    batch_size: 1

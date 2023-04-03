@@ -1,0 +1,17 @@
+name: 'z-mtf static lerp of gender vector 1'
+
+dataset:
+    type: 'delta-z'
+    name: 'z-mtf'
+    dims_in: 512
+    dims_out: 1
+
+model:
+    type: 'transform-classify'
+    t:
+        type: 'ai_old.models.t.lerp.StaticLerpTransformer'
+        scale: 2
+        path: 'delta-z/mtf/1.gz'
+
+inf:
+    batch_size: 256

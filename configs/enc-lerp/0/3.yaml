@@ -1,0 +1,32 @@
+info: 'enc lerp v1'
+task: 'ai_old.task.enc_lerp.EncLerpTask'
+seed: 0
+fp32: false
+n_steps: 25000000
+# eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.w_plus.RealInversionDataset'
+    imsize: 256
+    batch_size: 32
+    batch_gpu: 'auto'
+    xflip: false
+
+trainer:
+    type: 'ai_old.trainer.enc_lerp.EncLerpTrainer'
+    w_lerp_exp: 'lerp/5/5'
+    ae_exp: 'rec/25/7'
+
+opt:
+    type: 'ranger'
+    lr: 0.001
+
+model:
+    type: 'ai_old.nn.models.lerp.enc.EncLerpV1'
+    n_id_res_blocks: 4
+    n_w_res_blocks: 2
+    n_delta_res_blocks: 2
+    n_gen_blocks: 8
+
+loss:
+    type: 'ai_old.loss.enc_lerp.EncLerpLoss'

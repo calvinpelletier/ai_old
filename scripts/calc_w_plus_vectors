@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+import os
+import numpy as np
+import ai_old.constants as c
+from ai_old.dataset import DatasetBase
+import ai_old.dataset.filter_func as ff
+from ai_old.util.pretrained import build_pretrained_sg2
+import tqdm
+from ai_old.util.etc import normalized_tensor_to_pil_img, resize_imgs, \
+    create_img_grid
+import torch
+from ai_old.util.factory import build_model_from_exp
+
+
+class DS(DatasetBase):
+    def filter_func(self):
+        return ff.for_dataset(
+            'ffhq-128',
+            additional_filter=lambda x: int(x['item_id']) < 80000,
+        )
+
+    def select_cols(self):
+        return {
+            'e4e_inv_w_plus': 'w',
+            'gender': 'gender',
+            'has_glasses': 'has_glasses',
+        }
+
+
+def calc_vectors(w0_only):
+    dataset = DS(False).inference_no_data_loader()
+
+    # cluster
+    if w0_only:
+        shape = (512,)
+    else:
+        shape = (18, 512)
+    male = np.zeros(shape)
+    male_count = 0
+    female = np.zeros(shape)
+    female_count = 0
+    glassed = np.zeros(shape)
+    glassed_count = 0
+    glassless = np.zeros(shape)
+    glassless_count = 0
+    for x in dataset:
+        w = x['w'].numpy()
+        if w0_only:
+            w = w[0]
+            assert w.shape == (512,)
+        else:
+            assert w.shape == (18, 512)
+        gender = x['gender'].numpy()
+        has_glasses = x['has_glasses'].numpy()
+        assert gender in [0., 1.]
+        is_male = gender == 1.
+        assert has_glasses in [0., 1.]
+        has_glasses = has_glasses == 1.
+
+        if is_male:
+            male += w
+            male_count += 1
+        else:
+            female += w
+            female_count += 1
+
+        if has_glasses:
+            glassed += w
+            glassed_count += 1
+        else:
+            glassless += w
+            glassless_count += 1
+
+    male /= male_count
+    female /= female_count
+    glassed /= glassed_count
+    glassless /= glassless_count
+
+    print(f'clustered {male_count} male and {female_count} female')
+    print(f'clustered {glassed_count} glassed and {glassless_count} glassless')
+
+    # calc vectors
+    gender_vec = female - male
+    glasses_vec = glassed - glassless
+
+    # save vectors
+    if w0_only:
+        fname = 'w0'
+    else:
+        fname = 'w_plus'
+    np.save(os.path.join(c.LERP_PATH, f'mtf/{fname}.npy'), gender_vec)
+    np.save(os.path.join(c.LERP_PATH, f'glasses/{fname}.npy'), glasses_vec)
+    print('saved vector')
+
+
+def test_lerp():
+    folder = os.path.join(c.LERP_PATH, 'debug')
+
+    swapper = build_model_from_exp('wswap/1/0', 'G', return_cfg=False).f
+    swapper = swapper.to('cuda').eval()
+
+    w_plus_gender_vec = np.load(os.path.join(c.LERP_PATH, 'mtf/w_plus.npy'))
+    w_plus_gender_vec = torch.tensor(w_plus_gender_vec).to('cuda')
+
+    w_plus_glasses_vec = np.load(os.path.join(c.LERP_PATH, 'glasses/w_plus.npy'))
+    w_plus_glasses_vec = torch.tensor(w_plus_glasses_vec).to('cuda')
+
+    w0_gender_vec = np.load(os.path.join(c.LERP_PATH, 'mtf/w0.npy'))
+    w0_gender_vec = torch.tensor(w0_gender_vec).to('cuda')
+
+    w0_glasses_vec = np.load(os.path.join(c.LERP_PATH, 'glasses/w0.npy'))
+    w0_glasses_vec = torch.tensor(w0_glasses_vec).to('cuda')
+
+    ss_gender_vec = np.load(os.path.join(c.LERP_PATH, 'mtf/0.npy'))
+    ss_gender_vec = torch.tensor(ss_gender_vec).to('cuda')
+
+    ss_glasses_vec = np.load(os.path.join(c.LERP_PATH, 'glasses/0.npy'))
+    ss_glasses_vec = torch.tensor(ss_glasses_vec).to('cuda')
+
+    G = build_pretrained_sg2().synthesis
+    G = G.to('cuda').eval()
+
+    dataset = DS(False).inference(batch_size=1, seed=0, rank=0, num_gpus=1)
+    with torch.no_grad():
+        for i, batch in enumerate(dataset):
+            if i >= 20:
+                break
+
+            w = batch['w'][0].to('cuda')
+            gender = batch['gender'][0].to('cuda')
+            has_glasses = batch['has_glasses'][0].to('cuda')
+
+            base_row = []
+            for mag in [0., 0.5, 0.75, 1., 1.25, 1.5]:
+                new_w = swapper(
+                    w.unsqueeze(0),
+                    gender.unsqueeze(0).unsqueeze(0),
+                    magnitude=mag,
+                )[0]
+                new_img = G(new_w, noise_mode='const')
+                new_img = resize_imgs(new_img, 256)[0]
+                base_row.append(normalized_tensor_to_pil_img(new_img))
+
+            w_plus_gender_row = []
+            for mag in [0., 0.5, 0.75, 1., 1.25, 1.5]:
+                sign = gender * 2. - 1.
+                new_w = w + w_plus_gender_vec * mag * sign
+                new_img = G(new_w.unsqueeze(0), noise_mode='const')
+                new_img = resize_imgs(new_img, 256)[0]
+                w_plus_gender_row.append(normalized_tensor_to_pil_img(new_img))
+
+            w0_gender_row = []
+            for mag in [0., 0.5, 0.75, 1., 1.25, 1.5]:
+                sign = gender * 2. - 1.
+                new_w = w + w0_gender_vec.unsqueeze(0).repeat(18, 1) * mag * sign
+                new_img = G(new_w.unsqueeze(0), noise_mode='const')
+                new_img = resize_imgs(new_img, 256)[0]
+                w0_gender_row.append(normalized_tensor_to_pil_img(new_img))
+
+            ss_gender_row = []
+            for mag in [0., 0.5, 0.75, 1., 1.25, 1.5]:
+                sign = gender * 2. - 1.
+                new_w = w + ss_gender_vec.unsqueeze(0).repeat(18, 1) * mag * sign
+                new_img = G(new_w.unsqueeze(0), noise_mode='const')
+                new_img = resize_imgs(new_img, 256)[0]
+                ss_gender_row.append(normalized_tensor_to_pil_img(new_img))
+
+            w_plus_glasses_row = []
+            for mag in [0., 0.5, 0.75, 1., 1.25, 1.5]:
+                sign = has_glasses * -2. + 1.
+                new_w = w + w_plus_glasses_vec * mag * sign
+                new_img = G(new_w.unsqueeze(0), noise_mode='const')
+                new_img = resize_imgs(new_img, 256)[0]
+                w_plus_glasses_row.append(normalized_tensor_to_pil_img(new_img))
+
+            w0_glasses_row = []
+            for mag in [0., 0.5, 0.75, 1., 1.25, 1.5]:
+                sign = has_glasses * -2. + 1.
+                new_w = w + w0_glasses_vec.unsqueeze(0).repeat(18, 1) * mag * sign
+                new_img = G(new_w.unsqueeze(0), noise_mode='const')
+                new_img = resize_imgs(new_img, 256)[0]
+                w0_glasses_row.append(normalized_tensor_to_pil_img(new_img))
+
+            ss_glasses_row = []
+            for mag in [0., 0.5, 0.75, 1., 1.25, 1.5]:
+                sign = has_glasses * -2. + 1.
+                new_w = w + ss_glasses_vec.unsqueeze(0).repeat(18, 1) * mag * sign
+                new_img = G(new_w.unsqueeze(0), noise_mode='const')
+                new_img = resize_imgs(new_img, 256)[0]
+                ss_glasses_row.append(normalized_tensor_to_pil_img(new_img))
+
+            create_img_grid([
+                base_row,
+                w_plus_gender_row,
+                w0_gender_row,
+                ss_gender_row,
+                w_plus_glasses_row,
+                w0_glasses_row,
+                ss_glasses_row,
+            ], 256).save(os.path.join(folder, f'{i}.png'))
+
+
+if __name__ == '__main__':
+    # calc_vectors(True)
+    # calc_vectors(False)
+    test_lerp()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

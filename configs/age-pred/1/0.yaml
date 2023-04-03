@@ -1,0 +1,28 @@
+info: 'img to full attrs'
+task: 'ai_old.task.classify.full_attr.FullAttrClassification'
+seed: 0
+fp32: false
+n_steps: 100000
+eval_freq: 10000
+
+dataset:
+    type: 'ai_old.dataset.classify.full.FullAttrDataset'
+    imsize: 256
+    batch_size: 16
+    batch_gpu: 'auto'
+    xflip: false
+
+trainer:
+    type: 'ai_old.trainer.classify.FullAttrClassificationTrainer'
+
+opt:
+    type: 'ranger'
+    lr: 0.01
+
+model:
+    type: 'ai_old.nn.models.classify.age.ImgAgeClassifier'
+
+loss:
+    type: 'ai_old.loss.coral.CoralLoss'
+    pred_key: 'age_pred'
+    target_key: 'age'

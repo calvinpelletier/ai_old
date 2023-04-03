@@ -1,0 +1,63 @@
+info: 'brew v2 128x128, 32 base, v1 e, resnet sg2 g, sg2 d'
+task: 'ai_old.task.distill.Sg2DistillTask'
+seed: 0
+fp32: false
+n_steps: 25000000
+# eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.w_plus.BrewDataset'
+    imsize: 128
+    batch_size: 16
+    batch_gpu: 'auto'
+    xflip: false # implemented in trainer
+
+trainer:
+    type: 'ai_old.trainer.brew.AdvBrewTrainerV2'
+    xflip: false
+    aug:
+        enabled: true
+        type: 'ada'
+        target: 0.6
+        speed: 'auto'
+        freq: 4
+        augpipe: 'bgc' # blit, geom, color
+
+opt:
+    G:
+        type: 'adam'
+        hparams: 'auto-sg2'
+        sch: 'flat'
+    D:
+        type: 'adam'
+        hparams: 'auto-sg2'
+        sch: 'flat'
+
+model:
+    teacher:
+        type: 'ai_old.nn.models.facegen.brew.NonTriTeacher'
+        lerp_exp: 'lerp/5/5'
+        low_res_exp: 'distill/4/0'
+    G:
+        type: 'ai_old.nn.models.facegen.brew.Brew'
+        nc_base: 32
+        e_type: 'v1'
+        e_pri_type: 'simple'
+        e_mod_type: 'adalin'
+        g_type: 'sg2'
+        sg2_architecture: 'resnet'
+    D:
+        type: 'ai_old.nn.models.discriminate.fast_sg2.FastSg2Discriminator'
+        nc_base: 32
+        num_fp16_res: 4
+
+loss:
+    type: 'ai_old.loss.brew.BrewLoss'
+    G:
+        rec:
+            weight: 10
+            perceptual_type: 'lpips_alex'
+    D:
+        gp:
+            freq: 16
+            weight: 'auto'

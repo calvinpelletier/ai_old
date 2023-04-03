@@ -1,0 +1,2 @@
+ln -fs $ASI_CODE/etc/.dockerignore_server $ASI_CODE/.dockerignore
+docker build -f $ASI_CODE/DockerfileServerRelease -t ahanu/asi-rel-test:latest $ASI_CODE

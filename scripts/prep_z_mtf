@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+import os
+import numpy as np
+import ai_old.constants as c
+import shutil
+
+
+latent_path = os.path.join(c.ASI_DATA_PATH, 'z-to-gender/x/{}.gz')
+gender_pred_path = os.path.join(c.ASI_DATA_PATH, 'z-to-gender/y/4/out.csv')
+vector_folder = os.path.join(c.ASI_DATA_PATH, 'delta-z/mtf')
+dataset_folder = os.path.join(c.ASI_DATASETS_PATH, 'z-male')
+
+min_conf = 0.85
+
+# load z gender data
+z_gender_data = []
+with open(gender_pred_path, 'r') as f:
+    for line in f:
+        id, gender, confidence = line.strip().split(',')
+        gender = int(gender)
+        confidence = float(confidence)
+        assert gender in [0, 1]
+        assert confidence >= 0. and confidence <= 1.
+        z_gender_data.append((
+            id,
+            np.loadtxt(latent_path.format(id)),
+            gender,
+            confidence,
+        ))
+print('loaded {} gender preds'.format(len(z_gender_data)))
+
+# cluster
+male = np.zeros(512)
+male_count = 0
+female = np.zeros(512)
+female_count = 0
+for _, z, gender, conf in z_gender_data:
+    if conf > min_conf:
+        if gender == 1:
+            male += z
+            male_count += 1
+        else:
+            female += z
+            female_count += 1
+male /= male_count
+female /= female_count
+print('clustered {} male and {} female'.format(male_count, female_count))
+
+# calc and save mtf vector
+vector = female - male
+np.savetxt(os.path.join(vector_folder, 'vector.gz'), vector)
+print('saved vector')
+
+# clean dataset folder
+if os.path.exists(dataset_folder):
+    shutil.rmtree(dataset_folder)
+os.makedirs(dataset_folder)
+
+# cp male zs to dataset
+for id, z, gender, conf in z_gender_data:
+    if gender == 1 and conf > min_conf:
+        np.savetxt(os.path.join(dataset_folder, '{}.gz'.format(id)), z)
+print('built dataset')

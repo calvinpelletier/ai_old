@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn.functional as F
+from torch.distributions.uniform import Uniform
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from ai_old.util.pretrained import build_pretrained_sg2, build_pretrained_e4e
+from ai_old.loss.hair import NonHairPixelLoss
+from ai_old.util.etc import normalized_tensor_to_pil_img, create_img_grid, \
+    resize_imgs, create_img_row, pil_to_tensor
+from tqdm import tqdm
+from ai_old.nn.models.lerp.gen import SimplestLerpGen
+import math
+from PIL import Image
+from ai_old.trainer.pti import PtiTrainer
+from ai_old.util.factory import build_model_from_exp
+from external.optimizer.ranger import Ranger
+
+
+FOLDER = '/home/asiu/data/lerp-gen-exp/6'
+SAMPLES_FOLDER = os.path.join(FOLDER, 'samples')
+os.makedirs(SAMPLES_FOLDER, exist_ok=True)
+LOSS_FOLDER = os.path.join(FOLDER, 'loss')
+os.makedirs(LOSS_FOLDER, exist_ok=True)
+PCOLOR_FOLDER = os.path.join(FOLDER, 'pcolor')
+os.makedirs(PCOLOR_FOLDER, exist_ok=True)
+
+Z_DIMS = 2
+N_LAYERS = 4
+LR_MUL = 1.
+OPT = 'adam'
+LR = 0.001
+DELTA_WEIGHT = 0.4
+NONHAIR_WEIGHT = 2.
+REG_WEIGHT = 1.
+REG_SCALE = 4.
+BATCH_SIZE = 8
+N_ITER = 50
+
+
+def run():
+    w_path = os.path.join(FOLDER, 'w.npy')
+    model_path = os.path.join(FOLDER, 'model.pt')
+    if os.path.isfile(w_path):
+        w = torch.from_numpy(np.load(w_path)).to('cuda').to(torch.float32)
+        img_generator = build_pretrained_sg2(path_override=model_path)
+    else:
+        aligned = Image.open('/home/asiu/data/sera/aligned/1024/12.png')
+        aligned_256 = aligned.resize((256, 256), Image.LANCZOS)
+        img_tensor = pil_to_tensor(aligned)
+        img_tensor_256 = pil_to_tensor(aligned_256)
+
+        with torch.no_grad():
+            E = build_pretrained_e4e()
+            w = E(img_tensor_256)
+            np.save(w_path, w.cpu().numpy())
+
+        pti_trainer = PtiTrainer('cuda')
+        img_generator = pti_trainer.train(img_tensor, w)
+        torch.save(img_generator.state_dict(), model_path)
+    img_generator = img_generator.synthesis
+
+    print(w.shape)
+    w = w.repeat(BATCH_SIZE, 1, 1)
+
+    with torch.no_grad():
+        img = img_generator(w, noise_mode='const')
+        img = resize_imgs(img, 256)
+    normalized_tensor_to_pil_img(img[0]).save(os.path.join(FOLDER, 'img.png'))
+
+    gender = torch.ones([BATCH_SIZE, 1], device='cuda')
+
+    gender_lerper = build_model_from_exp('lerp/5/5', 'G', return_cfg=False).f
+    gender_lerper = gender_lerper.to('cuda')
+    gender_lerper.eval()
+    with torch.no_grad():
+        swap_w = gender_lerper(w, gender, magnitude=1.)
+        swap_img = img_generator(swap_w, noise_mode='const')
+        swap_img = resize_imgs(swap_img, 256)
+    normalized_tensor_to_pil_img(swap_img[0]).save(
+        os.path.join(FOLDER, 'base_swap.png'))
+
+    w = swap_w
+    img = swap_img
+
+    nonhair_loss_model = NonHairPixelLoss(
+        img,
+    ).eval().requires_grad_(False).to('cuda')
+
+    z_sampler = Uniform(-1., 1.)
+
+    G = SimplestLerpGen(
+        z_dims=Z_DIMS,
+        n_layers=N_LAYERS,
+        lr_mul=LR_MUL,
+    ).train().to('cuda')
+
+    if OPT == 'adam':
+        opt = torch.optim.Adam(G.parameters(), lr=LR)
+    elif OPT == 'ranger':
+        opt = Ranger(G.parameters(), lr=LR)
+    else:
+        raise Exception(OPT)
+
+    inv_z_dims = 1. / Z_DIMS
+    inv_w_dims = 1. / 512
+
+    delta_losses = []
+    nonhair_losses = []
+    reg_losses = []
+    total_losses = []
+    for i in tqdm(range(N_ITER)):
+        opt.zero_grad()
+
+        z = z_sampler.sample((BATCH_SIZE, Z_DIMS)).to('cuda')
+
+        new_w = G(z, w)
+
+        new_img = img_generator(new_w, noise_mode='const')
+        new_img = resize_imgs(new_img, 256)
+
+        delta_loss = F.mse_loss(new_w, w)
+
+        nonhair_loss = nonhair_loss_model(new_img)
+
+        reg_loss = F.mse_loss(
+            (new_w - w).norm(p=1, dim=2).mean(dim=1) * inv_w_dims * \
+                REG_SCALE,
+            z.norm(p=1, dim=1) * inv_z_dims,
+        )
+
+        total_loss = delta_loss * DELTA_WEIGHT + \
+            nonhair_loss * NONHAIR_WEIGHT + \
+            reg_loss * REG_WEIGHT
+
+        delta_losses.append(delta_loss.item())
+        nonhair_losses.append(nonhair_loss.item())
+        reg_losses.append(reg_loss.item())
+        total_losses.append(total_loss.item())
+
+        total_loss.backward()
+        opt.step()
+
+    plt.plot(delta_losses)
+    plt.savefig(os.path.join(LOSS_FOLDER, 'loss_delta.png'))
+    plt.clf()
+
+    plt.plot(nonhair_losses)
+    plt.savefig(os.path.join(LOSS_FOLDER, 'loss_nonhair.png'))
+    plt.clf()
+
+    plt.plot(reg_losses)
+    plt.savefig(os.path.join(LOSS_FOLDER, 'loss_reg.png'))
+    plt.clf()
+
+    plt.plot(total_losses)
+    plt.savefig(os.path.join(LOSS_FOLDER, 'loss_total.png'))
+    plt.clf()
+
+    grid = []
+    n = 8
+    with torch.no_grad():
+        if Z_DIMS == 2:
+            xs = np.linspace(-1., 1., num=n)
+            ys = np.linspace(-1, 1., num=n)
+            for y in ys:
+                z = torch.cat([
+                    torch.tensor(xs).to(torch.float32).unsqueeze(1),
+                    torch.tensor([y] * n).to(torch.float32).unsqueeze(1),
+                ], dim=1).to('cuda')
+                new_w = G(z, w)
+                new_img = img_generator(new_w, noise_mode='const')
+                new_img = resize_imgs(new_img, 256)
+                row = [normalized_tensor_to_pil_img(im) for im in new_img]
+                grid.append(row)
+        else:
+            for y in range(n):
+                z = torch.randn([n, Z_DIMS], device='cuda')
+                new_w = G(z, w)
+                new_img = img_generator(new_w, noise_mode='const')
+                new_img = resize_imgs(new_img, 256)
+                row = [normalized_tensor_to_pil_img(im) for im in new_img]
+                grid.append(row)
+    create_img_grid(grid, 256).save(
+        os.path.join(SAMPLES_FOLDER, 'samples.png'))
+
+
+if __name__ == '__main__':
+    run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

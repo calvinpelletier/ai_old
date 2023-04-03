@@ -1,0 +1,39 @@
+info: 'lerp gen test'
+task: 'ai_old.task.lerp_gen.LerpGenTask'
+seed: 0
+fp32: false
+n_steps: 25000000
+eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.w_plus.RealInversionDataset'
+    imsize: 256
+    batch_size: 8
+    batch_gpu: 'auto'
+    xflip: false
+
+trainer:
+    type: 'ai_old.trainer.lerp_gen.LerpGenTrainer'
+
+opt:
+    type: 'ranger'
+    lr: 0.01
+
+model:
+    type: 'ai_old.nn.models.lerp.gen.LerpGen'
+    z_dims: 512
+    n_layers: 4
+    lr_mul: 1.
+
+loss:
+    type: 'ai_old.loss.lerp_gen.LerpGenLoss'
+    face:
+        weight: 0.05
+    delta:
+        weight: 0.8
+    classify:
+        weight: 1.
+        l2: false
+    reg:
+        weight: 0.1
+        scale: 1.

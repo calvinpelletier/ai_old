@@ -1,0 +1,1 @@
+docker build -f DockerfileServerRelease -t ahanu/asi:server .

@@ -1,0 +1,24 @@
+info: 'arcface e, style g, pixel loss'
+task: 'ai_old.task.rec.rec.RecTask'
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqGanDataset'
+    batch_size: 32
+
+trainer:
+    type: 'ai_old.trainer.iit.NonGanRecTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.arcface.ArcfaceStyleRecOnlyEncGen'
+
+loss:
+    type: 'ai_old.loss.imsim.ImsimLoss'
+    pixel:
+        weight: 1

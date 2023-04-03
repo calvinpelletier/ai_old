@@ -1,0 +1,31 @@
+info: 'gender classification from hre latent'
+task: 'ai_old.task.classify.gender.GenderClassificationTask'
+seed: 0
+fp32: False
+n_steps: 25000000
+eval_freq: 100000
+# eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.classify.gender.ImgGenderClassificationDataset'
+    imsize: 128
+    batch_size: 'auto'
+    batch_gpu: 'auto'
+    xflip: True
+
+trainer:
+    type: 'ai_old.trainer.classify.LatentGenderClassificationTrainer'
+
+opt:
+    type: 'adam'
+    hparams: 'auto-sg2'
+    sch: 'flat'
+
+model:
+    type: 'ai_old.nn.models.classify.pretrained_e.BinaryClassiferFromPretrainedEncoder'
+    ae_exp: 'rec/21/3'
+    z_dims: 512
+    n_layers: 8
+
+loss:
+    type: 'ai_old.loss.classify.BinaryClassificationLoss'

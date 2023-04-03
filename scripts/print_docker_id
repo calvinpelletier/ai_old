@@ -1,0 +1,1 @@
+basename $(cat /proc/1/cpuset)

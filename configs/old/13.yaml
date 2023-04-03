@@ -1,0 +1,16 @@
+name: 'stylegan'
+inferencer: 'ai_old.inf.stylegan.Stylegan'
+
+dataset:
+    type: 'gaussian'
+    dims: 512
+    n: 1
+
+model:
+    g:
+        type: 'ai_old.models.g.stylegan.Generator'
+        path: 'stylegan/stylegan2-ffhq-config-f.pt'
+
+inf:
+    batch_size: 1
+    truncation: 0.5

@@ -1,0 +1,23 @@
+info: 'predict age from z (data comes from img to age preds)'
+task: 'ai_old.task.classify.age.ZAgeClassification'
+
+dataset:
+    type: 'ai_old.dataset.classify.age.ZAgeDataset'
+    batch_size: 32
+    split: 0.99
+
+model:
+    type: 'ai_old.nn.models.classify.age.ZAgeClassifier'
+    norm: 'none'
+
+loss:
+    type: 'ai_old.loss.coral.CoralLoss'
+    pred_key: 'z_age_pred'
+    target_key: 'age_enc'
+
+trainer:
+    type: 'ai_old.trainer.synthswap.zattr.ZAttrTrainer'
+    opt: 'ranger'
+    lr: 0.01
+    sch: 'flat_cosine'
+    n_epochs: 40

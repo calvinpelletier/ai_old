@@ -1,0 +1,85 @@
+name: 'mk2'
+trainer: 'ai_old.trainers.mk2.Mk2Trainer'
+
+dataset:
+    type: 'mk2'
+    size: 256
+    paired: 'delta-g-256'
+    unpaired: 'itw-256'
+    split: 0.995
+    exp: 27 # continuous gender classifier
+    aug:
+        flip: True
+
+model:
+    gender_dims: 128
+    disentangled_dims: 256
+    size: 2 # n down in e, n up in g
+    nc: 64 # base nc used in several submodels
+    iit:
+        type: 'ai_old.models.combined.mk2.Mk2iit'
+    e:
+        type: 'ai_old.models.e.identity.IdentityEncoder'
+        nc_in: 3
+        n_res: 4
+        norm: 'pixel'
+        padding: 'reflect'
+        weight_norm: True
+        activation: 'lrelu'
+    c:
+        type: 'ai_old.models.c.gender.FluidGenderClassifier'
+        exp: 27
+        nc_in: 3
+        nc: 32
+        n_res: 4
+        n_down: 3
+        padding: 'reflect'
+        weight_norm: True
+        activation: 'lrelu'
+        norm: 'batch'
+    g:
+        type: 'ai_old.models.g.style.StyleGenerator'
+        norm: 'pixel'
+        padding: 'reflect'
+        weight_norm: True
+        activation: 'lrelu'
+    t:
+        type: 'ai_old.models.t.mlp.GenderMlpTransformer'
+        hidden: [256, 256, 256, 256, 256, 256]
+        norm: 'pixel'
+        weight_norm: True
+        activation: 'lrelu'
+    d:
+        type: 'ai_old.models.d.style.StyleDiscriminator'
+        cdiv: 4
+
+train:
+    avg: False
+    loss:
+        gan:
+            weight: 1.
+        mag:
+            weight: 10.
+            delta_g_mult: 2.
+        cyc:
+            weight: 1.
+        id:
+            weight: 1.
+        gender:
+            weight: 1.
+        paired:
+            weight: 10.
+    epochs: 100
+    batch_size: 2
+    iit:
+        lr: 0.001
+        beta1: 0.
+        beta2: 0.999
+        gamma: 0.5
+        step_size: 40
+    d:
+        lr: 0.001
+        beta1: 0.
+        beta2: 0.999
+        gamma: 0.5
+        step_size: 20

@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn.functional as F
+from torch.distributions.uniform import Uniform
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from ai_old.util.pretrained import build_pretrained_sg2, build_pretrained_e4e
+from ai_old.loss.perceptual.face import SoloFaceIdLoss
+from ai_old.loss.gender import GenderLoss
+from ai_old.util.etc import normalized_tensor_to_pil_img, create_img_grid, \
+    resize_imgs, create_img_row, pil_to_tensor
+from tqdm import tqdm
+from ai_old.nn.models.lerp.gen import SimplestLerpGen
+import math
+from PIL import Image
+from ai_old.trainer.pti import PtiTrainer
+from ai_old.util.factory import build_model_from_exp
+from external.optimizer.ranger import Ranger
+
+
+FOLDER = '/home/asiu/data/lerp-gen-exp/5'
+SAMPLES_FOLDER = os.path.join(FOLDER, 'samples')
+os.makedirs(SAMPLES_FOLDER, exist_ok=True)
+LOSS_FOLDER = os.path.join(FOLDER, 'loss')
+os.makedirs(LOSS_FOLDER, exist_ok=True)
+PCOLOR_FOLDER = os.path.join(FOLDER, 'pcolor')
+os.makedirs(PCOLOR_FOLDER, exist_ok=True)
+
+HPARAMS = [
+    {
+        'z_dims': 2,
+        'n_layers': 4,
+        'lr_mul': 1.,
+        'opt': 'adam',
+        'lr': 0.001,
+        'reg_weight': 1.,
+        'reg_scale': 4.,
+    },
+]
+
+BATCH_SIZE = 8
+N_ITER = 50
+
+FACE_WEIGHT = 0.05
+DELTA_WEIGHT = 0.8
+CLASSIFY_WEIGHT = 1.
+L2_CLASSIFY = False
+
+
+def run():
+    w_path = os.path.join(FOLDER, 'w.npy')
+    model_path = os.path.join(FOLDER, 'model.pt')
+    if os.path.isfile(w_path):
+        w = torch.from_numpy(np.load(w_path)).to('cuda').to(torch.float32)
+        img_generator = build_pretrained_sg2(path_override=model_path)
+    else:
+        aligned = Image.open('/home/asiu/data/sera/aligned/1024/12.png')
+        aligned_256 = aligned.resize((256, 256), Image.LANCZOS)
+        img_tensor = pil_to_tensor(aligned)
+        img_tensor_256 = pil_to_tensor(aligned_256)
+
+        with torch.no_grad():
+            E = build_pretrained_e4e()
+            w = E(img_tensor_256)
+            np.save(w_path, w.cpu().numpy())
+
+        pti_trainer = PtiTrainer('cuda')
+        img_generator = pti_trainer.train(img_tensor, w)
+        torch.save(img_generator.state_dict(), model_path)
+    img_generator = img_generator.synthesis
+
+    print(w.shape)
+    w = w.repeat(BATCH_SIZE, 1, 1)
+
+    with torch.no_grad():
+        img = img_generator(w, noise_mode='const')
+        img = resize_imgs(img, 256)
+    normalized_tensor_to_pil_img(img[0]).save(os.path.join(FOLDER, 'img.png'))
+
+    gender = torch.ones([BATCH_SIZE, 1], device='cuda')
+
+    cluster_lerper = build_model_from_exp('lerp/3/0', 'G', return_cfg=False).f
+    cluster_lerper = cluster_lerper.to('cuda')
+    cluster_lerper.eval()
+    with torch.no_grad():
+        cluster_w = cluster_lerper(w, gender, magnitude=1.)
+        cluster_img = img_generator(cluster_w, noise_mode='const')
+        cluster_img = resize_imgs(cluster_img, 256)
+    normalized_tensor_to_pil_img(cluster_img[0]).save(
+        os.path.join(FOLDER, 'base_swap.png'))
+
+    face_loss_model = SoloFaceIdLoss(
+        256,
+        img,
+    ).eval().requires_grad_(False).to('cuda')
+
+    classify_loss_model = GenderLoss(
+        l2=L2_CLASSIFY,
+    ).eval().requires_grad_(False).to('cuda')
+
+    z_sampler = Uniform(-1., 1.)
+
+    for exp, hp in enumerate(HPARAMS):
+        G = SimplestLerpGen(
+            z_dims=hp['z_dims'],
+            n_layers=hp['n_layers'],
+            lr_mul=hp['lr_mul'],
+        ).train().to('cuda')
+
+        if hp['opt'] == 'adam':
+            opt = torch.optim.Adam(G.parameters(), lr=hp['lr'])
+        elif hp['opt'] == 'ranger':
+            opt = Ranger(G.parameters(), lr=hp['lr'])
+        else:
+            raise Exception(hp['opt'])
+
+        inv_z_dims = 1. / hp['z_dims']
+        inv_w_dims = 1. / 512
+
+        delta_losses = []
+        face_losses = []
+        classify_losses = []
+        reg_losses = []
+        total_losses = []
+        for i in tqdm(range(N_ITER)):
+            opt.zero_grad()
+
+            z1 = z_sampler.sample((BATCH_SIZE, hp['z_dims'])).to('cuda')
+            z2 = z_sampler.sample((BATCH_SIZE, hp['z_dims'])).to('cuda')
+
+            w1 = G(z1, w)
+            w2 = G(z2, w)
+
+            img1 = img_generator(w1, noise_mode='const')
+            img1 = resize_imgs(img1, 256)
+            img2 = img_generator(w2, noise_mode='const')
+            img2 = resize_imgs(img2, 256)
+
+            delta_loss = F.mse_loss(w1, w) + F.mse_loss(w2, w)
+
+            face_loss = face_loss_model(img1) + face_loss_model(img2)
+
+            classify_loss = classify_loss_model(img1, 1. - gender) + \
+                classify_loss_model(img2, 1. - gender)
+
+            # print('~~~')
+            # print((z1.norm(p=1, dim=1) * inv_z_dims).cpu().detach().numpy())
+            # print(((z2 - z1).norm(p=1, dim=1) * inv_z_dims).cpu().detach().numpy())
+            # print(((w1 - cluster_w).norm(p=1, dim=2).mean(dim=1) * inv_w_dims).cpu().detach().numpy())
+            # print(((w2 - w1).norm(p=1, dim=2).mean(dim=1) * inv_w_dims).cpu().detach().numpy())
+            # reg_loss = F.mse_loss(
+            #     (w2 - w1).norm(p=1, dim=2).mean(dim=1) * inv_w_dims * \
+            #         hp['reg_scale'],
+            #     (z2 - z1).norm(p=1, dim=1) * inv_z_dims,
+            # )
+            reg_loss1 = F.mse_loss(
+                (w1 - cluster_w).norm(p=1, dim=2).mean(dim=1) * inv_w_dims * \
+                    hp['reg_scale'],
+                z1.norm(p=1, dim=1) * inv_z_dims,
+            )
+            reg_loss2 = F.mse_loss(
+                (w2 - cluster_w).norm(p=1, dim=2).mean(dim=1) * inv_w_dims * \
+                    hp['reg_scale'],
+                z2.norm(p=1, dim=1) * inv_z_dims,
+            )
+            reg_loss = reg_loss1 + reg_loss2
+
+            total_loss = face_loss * FACE_WEIGHT + \
+                delta_loss * DELTA_WEIGHT + \
+                classify_loss * CLASSIFY_WEIGHT + \
+                reg_loss * hp['reg_weight']
+
+            delta_losses.append(delta_loss.item())
+            face_losses.append(face_loss.item())
+            classify_losses.append(classify_loss.item())
+            reg_losses.append(reg_loss.item())
+            total_losses.append(total_loss.item())
+
+            total_loss.backward()
+            opt.step()
+
+        plt.plot(delta_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_delta.png'))
+        plt.clf()
+
+        plt.plot(face_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_face.png'))
+        plt.clf()
+
+        plt.plot(classify_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_classify.png'))
+        plt.clf()
+
+        plt.plot(reg_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_reg.png'))
+        plt.clf()
+
+        plt.plot(total_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_total.png'))
+        plt.clf()
+
+        grid = []
+        n = 8
+        with torch.no_grad():
+            if hp['z_dims'] == 2:
+                xs = np.linspace(-1., 1., num=n)
+                ys = np.linspace(-1, 1., num=n)
+                for y in ys:
+                    z = torch.cat([
+                        torch.tensor(xs).to(torch.float32).unsqueeze(1),
+                        torch.tensor([y] * n).to(torch.float32).unsqueeze(1),
+                    ], dim=1).to('cuda')
+                    new_w = G(z, w)
+                    new_img = img_generator(new_w, noise_mode='const')
+                    new_img = resize_imgs(new_img, 256)
+                    row = [normalized_tensor_to_pil_img(im) for im in new_img]
+                    grid.append(row)
+            else:
+                for y in range(n):
+                    z = torch.randn([n, hp['z_dims']], device='cuda')
+                    new_w = G(z, w)
+                    new_img = img_generator(new_w, noise_mode='const')
+                    new_img = resize_imgs(new_img, 256)
+                    row = [normalized_tensor_to_pil_img(im) for im in new_img]
+                    grid.append(row)
+        create_img_grid(grid, 256).save(
+            os.path.join(SAMPLES_FOLDER, f'{exp}.png'))
+
+
+if __name__ == '__main__':
+    run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

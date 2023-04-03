@@ -1,0 +1,42 @@
+info: 'extra light face generator and autoencoder discriminator'
+task: 'ai_old.task.facegen.light.LightFemaleFacegenTask'
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqFemaleGanDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.gan.GanTrainer'
+    n_epochs: 20
+
+opt:
+    type: 'adabelief'
+    hparams: 'small_gan'
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.facegen.light.ExtraLightFaceGenerator'
+    z_dims: 512
+
+loss:
+    type: 'ai_old.loss.gan.GLoss'
+    gan:
+        type: 'hinge'
+
+# discriminator
+subtrainer:
+    type: 'ai_old.trainer.discriminator.DiscriminatorTrainer'
+    name: 'd'
+
+    model:
+        type: 'ai_old.nn.models.discriminate.ae.AutoencoderDiscriminator'
+
+    loss:
+        type: 'ai_old.loss.gan.DLoss'
+        gan:
+            type: 'hinge'
+
+    opt:
+        type: 'adabelief'
+        hparams: 'small_gan'
+        sch: 'flat_cosine'

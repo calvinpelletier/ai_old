@@ -1,0 +1,28 @@
+name: 'binary gender classifier'
+trainer: 'ai_old.trainers.classifier.TransferBinaryClassifierTrainer'
+inferencer: 'ai_old.inf.classifier.BinaryEncoderClassifier'
+
+dataset:
+    type: 'ffhq-gender'
+    name: 'itw-128'
+    split: 0.997
+    size: 128
+    aug:
+        flip: True
+
+model:
+    c:
+        type: 'ai_old.models.c.gender.TransferGenderClassifier'
+        dims_out: 1
+        hidden: [128, 32, 8]
+
+train:
+    epochs: 10
+    batch_size: 32
+    opt:
+        lr: 0.005
+        step_size: 4
+        gamma: 0.5
+
+inf:
+    batch_size: 32

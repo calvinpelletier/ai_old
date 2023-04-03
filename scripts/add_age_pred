@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn.functional as F
+import ai_old.constants as c
+from ai_old.models.factory import build_model
+from tqdm import tqdm
+from PIL import Image
+from ai_old.dataset.dataset import _get_transform
+from ai_old.util import config
+import os
+
+
+def run(path):
+    exp_conf = config.load(os.path.join(
+        c.CONFIGS_FOLDER,
+        'age/0/base.yaml',
+    ))
+    model = build_model(
+        exp_conf,
+        exp_conf.model.c.type,
+        init=False,
+    )
+    latest_path = os.path.join(c.EXP_PATH, 'age/0/base/saves/latest.pt')
+    model.load(torch.load(latest_path)['c'])
+    model.to('cuda')
+    model.eval()
+
+    ages = torch.tensor([1, 4, 8, 12, 17, 25, 35, 45, 60, 80]).float().cuda()
+
+    im_path = os.path.join(path, 'ims/{}_{}.png')
+    metrics_path = os.path.join(path, 'metrics.csv')
+    lines = []
+    with open(metrics_path, 'r') as f:
+        for line in tqdm(f.readlines()):
+        # for line in f.readlines():
+            parts = line.strip().split(',')
+            age0 = _get_age(ages, model, im_path.format(parts[0], 'f'))
+            age1 = _get_age(ages, model, im_path.format(parts[0], 'm'))
+            # raw_age_diff = abs(age0 - age1)
+            # scale =
+            # print(parts[0], age0, age1)
+            parts.append(f'{age0:.4f}')
+            parts.append(f'{age1:.4f}')
+            lines.append(','.join(parts))
+
+    with open(metrics_path, 'w') as f:
+        f.write('\n'.join(lines))
+        f.write('\n')
+
+
+def _get_age(ages, model, im_path):
+    img = Image.open(im_path).convert('RGB')
+    x = _get_transform(False, True)(img).cuda()
+    y = model(x.unsqueeze(0))[0]
+    y = F.softmax(y)
+    y *= ages
+    y = torch.sum(y)
+    return y.cpu().item()
+
+
+def _age_to_perceptual_tolerance(age):
+    return 10. / (1. + math.exp(-0.15 * age + 4))
+
+
+if __name__ == '__main__':
+    run('/home/asiu/data/z-exploration/y/1')

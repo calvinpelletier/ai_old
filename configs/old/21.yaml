@@ -1,0 +1,27 @@
+name: 'genderattrlatent exploration'
+inferencer: 'ai_old.inf.attrlatent.TmpAttrLatentInf'
+
+dataset:
+    type: 'zgender'
+    gender: 0
+
+model:
+    g:
+        type: 'ai_old.models.g.stylegan.Generator'
+        path: 'stylegan/stylegan2-ffhq-config-f.pt'
+    c:
+        type: 'ai_old.models.c.mlp.MlpClassifier'
+        hidden: [64]
+        exp: 4
+        dims_in: 512
+        dims_out: 1
+    t:
+        type: 'ai_old.models.t.lerp.StaticLerpTransformer'
+        path: 'delta-z/mtf/1.gz'
+    seg:
+        type: 'ai_old.models.seg.deeplab.FaceSegmenter'
+        n_classes: 19
+        path: 'deeplab/deeplab_model.pth'
+
+inf:
+    batch_size: 1

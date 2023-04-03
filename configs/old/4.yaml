@@ -1,0 +1,25 @@
+name: 'z-to-gender classifier'
+
+dataset:
+    type: 'binaryclassification'
+    name: 'z-to-gender'
+    dims_in: 512
+    dims_out: 1
+    split: 0.98
+
+model:
+    type: 'classifier'
+    c:
+        type: 'ai_old.models.c.mlp.MlpClassifier'
+        hidden: [64]
+
+train:
+    epochs: 25
+    batch_size: 32
+    opt:
+        lr: 0.0001
+        step_size: 10
+        gamma: 0.1
+
+inf:
+    batch_size: 256

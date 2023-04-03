@@ -1,0 +1,2 @@
+comparison_metric: fid
+base_image_columns: []

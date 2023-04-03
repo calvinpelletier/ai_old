@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn.functional as F
+from torch.distributions.uniform import Uniform
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from ai_old.util.pretrained import build_pretrained_sg2, build_pretrained_e4e
+from ai_old.loss.perceptual.face import SoloFaceIdLoss
+from ai_old.loss.gender import GenderLoss
+from ai_old.util.etc import normalized_tensor_to_pil_img, create_img_grid, \
+    resize_imgs, create_img_row, pil_to_tensor
+from PIL import Image
+from tqdm import tqdm
+from ai_old.nn.models.lerp.gen import SimplestLerpGen
+import math
+from ai_old.trainer.pti import PtiTrainer
+
+
+FOLDER = '/home/asiu/data/lerp-gen-exp/4'
+SAMPLES_FOLDER = os.path.join(FOLDER, 'samples')
+os.makedirs(SAMPLES_FOLDER, exist_ok=True)
+LOSS_FOLDER = os.path.join(FOLDER, 'loss')
+os.makedirs(LOSS_FOLDER, exist_ok=True)
+PCOLOR_FOLDER = os.path.join(FOLDER, 'pcolor')
+os.makedirs(PCOLOR_FOLDER, exist_ok=True)
+
+HPARAMS = [
+    {
+        'n_layers': 4,
+        'lr_mul': 1.,
+        'opt': 'adam',
+        'lr': 0.001,
+    },
+]
+
+BATCH_SIZE = 8
+N_ITER = 100
+
+CLASSIFY_WEIGHT = 1.
+L2_CLASSIFY = False
+
+DELTA_RANGE = (0.4, 1.6)
+FACE_RANGE = (0.025, 0.1)
+Z_DIMS = 2
+
+
+class DylossSampler:
+    def __init__(self):
+        self.delta = Uniform(DELTA_RANGE[0], DELTA_RANGE[1])
+        self.face = Uniform(FACE_RANGE[0], FACE_RANGE[1])
+        self.delta_idx = 0
+        self.face_idx = 1
+
+    def sample(self):
+        return torch.cat([
+            self.delta.sample((BATCH_SIZE,)).unsqueeze(1),
+            self.face.sample((BATCH_SIZE,)).unsqueeze(1),
+        ], dim=1).to('cuda')
+
+    def create(self, delta, face):
+        return torch.cat([
+            torch.tensor(delta).to(torch.float32).unsqueeze(1),
+            torch.tensor(face).to(torch.float32).unsqueeze(1),
+        ], dim=1).to('cuda')
+
+
+def run():
+    w_path = os.path.join(FOLDER, 'w.npy')
+    model_path = os.path.join(FOLDER, 'model.pt')
+    if os.path.isfile(w_path):
+        w = torch.from_numpy(np.load(w_path)).to('cuda').to(torch.float32)
+        img_generator = build_pretrained_sg2(path_override=model_path)
+    else:
+        aligned = Image.open('/home/asiu/data/sera/aligned/1024/12.png')
+        aligned_256 = aligned.resize((256, 256), Image.LANCZOS)
+        img_tensor = pil_to_tensor(aligned)
+        img_tensor_256 = pil_to_tensor(aligned_256)
+
+        with torch.no_grad():
+            E = build_pretrained_e4e()
+            w = E(img_tensor_256)
+            np.save(w_path, w.cpu().numpy())
+
+        pti_trainer = PtiTrainer('cuda')
+        img_generator = pti_trainer.train(img_tensor, w).synthesis
+        torch.save(img_generator.state_dict(), model_path)
+
+    print(w.shape)
+    w = w.repeat(BATCH_SIZE, 1, 1)
+
+    img = img_generator(w, noise_mode='const')
+    img = resize_imgs(img, 256)
+    normalized_tensor_to_pil_img(img[0]).save(os.path.join(FOLDER, 'img.png'))
+
+    gender = torch.ones([BATCH_SIZE, 1], device='cuda')
+
+    face_loss_model = SoloFaceIdLoss(
+        256,
+        img,
+    ).eval().requires_grad_(False).to('cuda')
+
+    classify_loss_model = GenderLoss(
+        l2=L2_CLASSIFY,
+    ).eval().requires_grad_(False).to('cuda')
+
+    z_sampler = DylossSampler()
+
+    for exp, hp in enumerate(HPARAMS):
+        G = SimplestLerpGen(
+            z_dims=Z_DIMS,
+            n_layers=hp['n_layers'],
+            lr_mul=hp['lr_mul'],
+        ).train().to('cuda')
+
+        assert hp['opt'] == 'adam'
+        opt = torch.optim.Adam(G.parameters(), lr=hp['lr'])
+
+        delta_losses = []
+        face_losses = []
+        classify_losses = []
+        total_losses = []
+        for i in tqdm(range(N_ITER)):
+            opt.zero_grad()
+
+            z = z_sampler.sample()
+
+            new_w = G(z, w)
+
+            new_img = img_generator(new_w, noise_mode='const')
+            new_img = resize_imgs(new_img, 256)
+
+            delta_loss = (F.mse_loss(new_w, w, reduction='none').mean(
+                dim=(1, 2)) * z[:, z_sampler.delta_idx].detach()).mean()
+
+            face_loss = (face_loss_model(new_img, avg_batch=False) * \
+                z[:, z_sampler.face_idx].detach()).mean()
+
+            classify_loss =  classify_loss_model(new_img, 1. - gender) * \
+                CLASSIFY_WEIGHT
+
+            total_loss = delta_loss + face_loss + classify_loss
+
+            delta_losses.append(delta_loss.item())
+            face_losses.append(face_loss.item())
+            classify_losses.append(classify_loss.item())
+            total_losses.append(total_loss.item())
+
+            total_loss.backward()
+            opt.step()
+
+        plt.plot(delta_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_delta.png'))
+        plt.clf()
+
+        plt.plot(face_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_face.png'))
+        plt.clf()
+
+        plt.plot(classify_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_classify.png'))
+        plt.clf()
+
+        plt.plot(total_losses)
+        plt.savefig(os.path.join(LOSS_FOLDER, f'{exp}_loss_total.png'))
+        plt.clf()
+
+        with torch.no_grad():
+            deltas = np.linspace(DELTA_RANGE[0], DELTA_RANGE[1], num=BATCH_SIZE)
+            faces = np.linspace(FACE_RANGE[0], FACE_RANGE[1], num=BATCH_SIZE)
+            grid = []
+            for y, face in enumerate(faces):
+                z = z_sampler.create(deltas, [face] * BATCH_SIZE)
+                new_w = G(z, w)
+                new_img = img_generator(new_w, noise_mode='const')
+                new_img = resize_imgs(new_img, 256)
+                grid.append([normalized_tensor_to_pil_img(x) for x in new_img])
+            create_img_grid(grid, 256).save(
+                os.path.join(SAMPLES_FOLDER, f'{exp}.png'))
+
+if __name__ == '__main__':
+    run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

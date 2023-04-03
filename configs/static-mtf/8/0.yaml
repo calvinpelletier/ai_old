@@ -1,0 +1,23 @@
+info: 'unet g and only lpips loss'
+task: 'ai_old.task.genderswap.static.StaticMtfTask'
+
+dataset:
+    type: 'ai_old.dataset.synthswap.pg.PairedGenderDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.iit.NonGanGeneratorTrainer'
+    n_epochs: 200
+
+opt:
+    type: 'adabelief'
+    hparams: 'small_gan'
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.iit.unet.UnetIIT'
+
+loss:
+    type: 'ai_old.loss.perceptual.lpips.LpipsSoloLoss'
+    gen_key: 'g_fake'
+    target_key: 'y'

@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+import ai_old.constants as c
+import os
+import sys
+from ai_old.nn.models.prod import get_prod_model
+import torch
+
+
+def convert_g(base='ai_old.nn.models.prod.v0.ProdV0', exp='blend-ult/0/0'):
+    output_folder = os.path.join(c.EXP_PATH, exp, 'export')
+    os.makedirs(output_folder, exist_ok=True)
+    onnx_path = os.path.join(output_folder, 'g.onnx')
+
+    model = get_prod_model(base=base, exp=exp)
+
+    assert base == 'ai_old.nn.models.prod.v0.ProdV0'
+    g = model.ult.g
+    dummy_identity = torch.randn(
+        1,
+        g.nc[-1],
+        g.init_imsize,
+        g.init_imsize,
+        device='cuda',
+    ).float().cuda()
+    dummy_z = torch.randn(1, g.z_dims).float().cuda()
+    dummy_bg = torch.randn(1, 3, g.output_imsize, g.output_imsize).float().cuda()
+    torch.onnx.export(
+        g,
+        (dummy_identity, dummy_z, dummy_bg),
+        onnx_path,
+        verbose=True,
+        input_names=['identity', 'z', 'ibg'],
+        output_names=['generated_img'],
+        opset_version=11,
+    )
+
+
+if __name__ == '__main__':
+    exp = sys.argv[1]
+    convert_g(exp=exp)

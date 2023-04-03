@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+import matplotlib.pyplot as plt
+from ai_old.dataset import filter_func as ff
+from ai_old.dataset import DatasetBase
+
+
+class DS(DatasetBase):
+    def filter_func(self):
+        return ff.for_dataset('facegen')
+
+    def select_cols(self):
+        return {
+            # 'face_image': 'im1',
+            # 'dynamic_ss': 'im2',
+            'gender': 'g1',
+            'gender_confidence': 'conf1',
+            'ss_gender': 'g2',
+            'ss_gender_confidence': 'conf2',
+        }
+
+
+def run():
+    ds = DS().inference(no_data_loader=True)
+    print(f'total: {len(ds)}')
+    data = []
+    very_bad = 0
+    for x in ds:
+        if x['g1'] == x['g2']:
+            very_bad += 1
+        else:
+            data.append(min(x['conf1'], x['conf2']))
+    print(f'very bad: {very_bad}')
+    print(f'remaining: {len(data)}')
+    _hist(data, 20)
+
+
+def _hist(data, bins, range_=None):
+    plt.hist(
+        data,
+        bins=bins,
+        range=range_,
+        density=True,
+        histtype='bar',
+    )
+    plt.show()
+
+
+if __name__ == '__main__':
+    run()

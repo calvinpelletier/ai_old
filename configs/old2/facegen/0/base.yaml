@@ -1,0 +1,22 @@
+name: 'gen faces using pretrained stylegan2'
+inferencer: 'ai_old.inf.stylegan.Stylegan'
+
+deps:
+    facegen:
+        path: 'stylegan/stylegan2-ffhq-config-f.pt'
+        frozen: True
+        strict: True
+
+dataset:
+    type: 'gaussian'
+    n: 50000
+    dims: 512
+
+model:
+    g:
+        type: 'dep'
+        dep: 'facegen'
+
+inf:
+    batch_size: 8
+    truncation: 0.7

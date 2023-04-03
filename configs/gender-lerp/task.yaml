@@ -1,0 +1,2 @@
+comparison_metric: mag
+base_image_columns: ['face_image', 'static_ss']

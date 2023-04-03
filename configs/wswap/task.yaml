@@ -1,0 +1,2 @@
+comparison_metric: 'unweighted_total'
+base_image_columns: ['face_image_256', 'e4e_inv_256']

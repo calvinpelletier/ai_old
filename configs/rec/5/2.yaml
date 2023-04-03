@@ -1,0 +1,51 @@
+info: 'light e, light g, pixel+lpips and warmup adversarial, adam'
+task: 'ai_old.task.rec.rec.RecTask'
+
+dataset:
+    type: 'ai_old.dataset.realface.ffhq.FfhqGanDataset'
+    batch_size: 32
+
+trainer:
+    type: 'ai_old.trainer.gan.RecGanTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.simple.SimpleRecOnlyEncGen'
+
+loss:
+    type: 'ai_old.loss.iit.gan.GuidedGLoss'
+    gan:
+        type: 'hinge'
+        weight: [0, 1, 100000]
+    pixel:
+        weight: 1
+
+# discriminator
+subtrainer:
+    type: 'ai_old.trainer.discriminator.DiscriminatorTrainer'
+    name: 'd'
+
+    model:
+        type: 'ai_old.nn.models.discriminate.ae.AutoencoderDiscriminator'
+
+    loss:
+        type: 'ai_old.loss.discrim.AutoencoderRegularizedDLoss'
+        gan:
+            type: 'hinge'
+            weight: 1
+        rec:
+            weight: 1
+        gp:
+            freq: 4
+            weight: 10
+
+    opt:
+        type: 'adam'
+        lr: 0.0004
+        sch: 'flat_cosine'

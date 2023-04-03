@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+import torch
+import torch.nn as nn
+from PIL import Image
+import numpy as np
+import os
+from ai_old.util.pretrained import build_pretrained_sg2
+from ai_old.util.etc import normalized_tensor_to_pil_img, resize_imgs, \
+    create_img_grid, create_img_row, AttrDict
+import ai_old.constants as c
+from shutil import copyfile
+import ai_old.dataset.filter_func as ff
+from ai_old.dataset import DatasetBase
+from ai_old.nn.models.swap.playground import ConstAgeSwapper, BaseSwapper
+from ai_old.loss.age import AgeDeltaLoss
+import matplotlib.pyplot as plt
+from ai_old.nn.models.swap.w_plus import PretrainedSynthSwapper
+from ai_old.loss.hair import HairDeltaLoss
+from ai_old.nn.models.swap.hair import HairDeltaGenerator
+from ai_old.nn.models.lerp.static import StaticLearnedWPlusLerp, \
+    convert_dynamic_lerper_to_static
+from ai_old.loss.clip import SoloClipSwapLoss
+from external.styleclip.latent_mappers import LevelsMapper
+from external.styleclip.etc import get_keys
+from ai_old.loss.styleclip import SoloStyleClipLoss
+from external.optimizer.ranger import Ranger
+from ai_old.util.factory import build_model_from_exp
+from ai_old.loss.lerp import SoloClassifyLerpLoss
+
+
+FOLDER = '/home/asiu/data/lerp-exp'
+GENDER_DIR_PATH = '/home/asiu/data/lerp/mtf/0.npy'
+SC_CKPT_PATH = '/home/asiu/code/styleclip/results/{}/checkpoints/best_model.pt'
+
+MAGS = [0., 0.5, 0.75, 1., 1.25, 1.5]
+
+SWAPPERS = [
+    ('base', BaseSwapper),
+    ('cur', PretrainedSynthSwapper),
+    ('age-const', ConstAgeSwapper),
+]
+
+
+class StyleClipLerper(nn.Module):
+    def __init__(self, name):
+        super().__init__()
+        ckpt = torch.load(SC_CKPT_PATH.format(name), map_location='cpu')
+        opts = AttrDict(ckpt['opts'])
+        self.lerper = LevelsMapper(opts)
+        self.lerper.load_state_dict(get_keys(ckpt, 'mapper'), strict=True)
+
+    def forward(self, w, _gender, magnitude=1.):
+        delta = self.lerper(w) * 0.1
+        return w + delta * magnitude
+
+
+def get_clean_set():
+    class DS(DatasetBase):
+        def filter_func(self):
+            return ff.for_dataset('ffhq-128')
+
+        def select_cols(self):
+            return {
+                'item_id': 'id',
+                'face_image_256': 'img',
+                'gender': 'gender',
+            }
+
+    return DS(False).get_clean_set(
+        1, # batch size
+        0, # seed
+        0, # rank
+        1, # num gpus
+        verbose=False,
+    )
+
+
+def save_ffhq_clean_to_dir():
+    src_path = os.path.join(
+        c.ASI_DATASETS_PATH,
+        c.SUPPLEMENTAL_DATASET_FOLDER_NAME,
+        'face_image_1024',
+        'ffhq-128',
+        '{}.png',
+    )
+    dest_path = os.path.join(FOLDER, 'aligned', '{}.png')
+
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+        copyfile(src_path.format(id), dest_path.format(id))
+
+
+def rename_models():
+    folder = os.path.join(FOLDER, 'models/sg2')
+    for fname in list(os.listdir(folder)):
+        if fname.startswith('model_'):
+            new_fname = fname.split('_')[-1]
+            assert len(new_fname) == 8 and new_fname.endswith('.pt')
+            os.rename(
+                os.path.join(folder, fname),
+                os.path.join(folder, new_fname),
+            )
+
+
+def rename_ws():
+    folder = os.path.join(FOLDER, 'w')
+    for subfolder in list(os.listdir(folder)):
+        os.rename(
+            os.path.join(folder, subfolder, '0.pt'),
+            os.path.join(folder, f'{subfolder}.pt')
+        )
+        os.rmdir(os.path.join(folder, subfolder))
+
+
+def copy_modelless_to_tmp_folder():
+    tmp_dir = os.path.join(FOLDER, 'tmp')
+    for tmp_file in os.listdir(tmp_dir):
+        os.remove(os.path.join(tmp_dir, tmp_file))
+
+    src_path = os.path.join(FOLDER, 'aligned/{}.png')
+    dest_path = os.path.join(FOLDER, 'tmp/{}.png')
+    model_path = os.path.join(FOLDER, 'models/sg2/{}.pt')
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+        if not os.path.isfile(model_path.format(id)):
+            copyfile(src_path.format(id), dest_path.format(id))
+
+
+def train_age_const_swapper():
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+
+        img = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+        gender = batch['gender'].to('cuda').to(torch.float32)
+        w = torch.load(
+            os.path.join(FOLDER, f'w/{id}.pt'),
+        ).to('cuda').to(torch.float32)
+
+        assert img.shape == (1, 3, 1024, 1024)
+        assert gender.shape == (1,)
+        assert w.shape == (1, 18, 512)
+
+        pti_g_path = os.path.join(FOLDER, f'models/sg2/{id}.pt')
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval().to('cuda')
+
+        swapper = ConstAgeSwapper().train().to('cuda')
+        loss_fn = AgeDeltaLoss(img).to('cuda')
+
+        debug_folder = os.path.join(FOLDER, 'debug')
+        save_path = os.path.join(FOLDER, f'models/swappers/age-const/{id}.pt')
+        n_iter = 100
+        opt = torch.optim.SGD(swapper.parameters(), lr=0.05)
+
+        debug_data = ([], [])
+        for i in range(n_iter):
+            opt.zero_grad()
+            swap_w, delta = swapper(w, gender, magnitude=1.)
+            swap_img = G(swap_w, noise_mode='const')
+            loss = loss_fn(swap_img)
+            debug_data[0].append(swapper.age_mag.item())
+            debug_data[1].append(loss.item())
+            loss.backward()
+            opt.step()
+
+        torch.save(swapper.state_dict(), save_path)
+
+        plt.scatter(debug_data[0][:-1], debug_data[1][:-1])
+        plt.scatter(debug_data[0][-1:], debug_data[1][-1:])
+        plt.savefig(os.path.join(debug_folder, 'param-v-loss', f'{id}.png'))
+        plt.clf()
+
+
+def train_hair_delta_generators():
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+
+        img = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+        w = torch.load(
+            os.path.join(FOLDER, f'w/{id}.pt'),
+        ).to('cuda').to(torch.float32)
+
+        pti_g_path = os.path.join(FOLDER, f'models/sg2/{id}.pt')
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval().to('cuda')
+
+        n_iter = 1000
+        batch_size = 8
+        z_dims = 8
+        n_samples = 12
+
+        loss_fn = HairDeltaLoss(img).to('cuda')
+
+        hparams = [
+            (1., 0.),
+        ]
+        for exp, (w_delta_mult, w_delta_loss_weight) in enumerate(hparams):
+            debug_folder = os.path.join(FOLDER, 'debug/hair-delta/0')
+            os.makedirs(debug_folder, exist_ok=True)
+            save_folder = os.path.join(FOLDER, 'models/hair-delta/0')
+            os.makedirs(save_folder, exist_ok=True)
+            save_path = os.path.join(save_folder, f'{id}.pt')
+
+            g_hair = HairDeltaGenerator(z_dims=z_dims).train().to('cuda')
+            opt = torch.optim.Adam(g_hair.parameters(), lr=0.002)
+
+            debug_data = []
+            for i in range(n_iter):
+                opt.zero_grad()
+                z = torch.randn(batch_size, z_dims, device='cuda')
+                new_w, delta = g_hair(w, z)
+                new_img = G(new_w, noise_mode='const')
+                loss = loss_fn(
+                    new_img, z, delta, w_delta_mult, w_delta_loss_weight)
+                debug_data.append(loss.item())
+                loss.backward()
+                opt.step()
+
+            torch.save(g_hair.state_dict(), save_path)
+
+            plt.plot(debug_data)
+            plt.savefig(os.path.join(debug_folder, f'loss_{id}.png'))
+            plt.clf()
+
+            samples = [G(w, noise_mode='const')]
+            for i in range(n_samples):
+                if i == 0:
+                    z = torch.zeros(1, z_dims, device='cuda')
+                else:
+                    z = torch.randn(1, z_dims, device='cuda')
+                new_w, delta = g_hair(w, z)
+                new_img = G(new_w, noise_mode='const')
+                samples.append(new_img)
+            samples = [
+                normalized_tensor_to_pil_img(resize_imgs(x, 256)[0]) \
+                for x in samples
+            ]
+            create_img_row(samples, 256).save(
+                os.path.join(debug_folder, f'samples_{id}.png'))
+
+
+def train_clip_swapper():
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+        print(id)
+
+        img = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+        gender = batch['gender'].to('cuda').to(torch.float32)
+        w = torch.load(
+            os.path.join(FOLDER, f'w/{id}.pt'),
+        ).to('cuda').to(torch.float32)
+
+        pti_g_path = os.path.join(FOLDER, f'models/sg2/{id}.pt')
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval().to('cuda')
+
+        loss_fn = SoloClipSwapLoss(img, gender, w).to('cuda')
+
+        n_iter = 2000
+        hparams = [
+            (.1, .8),
+            # (0., 0.),
+            # (.1, 0.),
+            # (0., .8),
+        ]
+        grid = []
+        for exp, (id_weight, delta_weight) in enumerate(hparams):
+            debug_folder = os.path.join(FOLDER, f'debug/clip-swap')
+            os.makedirs(debug_folder, exist_ok=True)
+            save_folder = os.path.join(FOLDER, f'models/clip-swap/{exp}')
+            os.makedirs(save_folder, exist_ok=True)
+            save_path = os.path.join(save_folder, f'{id}.pt')
+
+            swapper = StaticLearnedWPlusLerp().train().to('cuda')
+            opt = torch.optim.SGD(swapper.parameters(), lr=0.05)
+            # opt = torch.optim.Adam(swapper.parameters(), lr=0.002)
+
+            debug_data = []
+            for i in range(n_iter):
+                opt.zero_grad()
+                new_w = swapper(w, magnitude=1.)
+                new_img = G(new_w, noise_mode='const')
+                loss = loss_fn(new_img, new_w, id_weight, delta_weight)
+                debug_data.append(loss.item())
+                loss.backward()
+                opt.step()
+
+            torch.save(swapper.state_dict(), save_path)
+
+            plt.plot(debug_data)
+            plt.savefig(os.path.join(debug_folder, f'loss_{exp}_{id}.png'))
+            plt.clf()
+
+            row = [G(w, noise_mode='const')]
+            for mag in MAGS:
+                new_w = swapper(w, magnitude=mag)
+                new_img = G(new_w, noise_mode='const')
+                row.append(new_img)
+            row = [
+                normalized_tensor_to_pil_img(resize_imgs(x, 256)[0]) \
+                for x in row
+            ]
+            grid.append(row)
+        create_img_grid(grid, 256).save(
+            os.path.join(debug_folder, f'grid_{id}.png'))
+
+
+def compare_swappers():
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+        print(id)
+
+        gender = batch['gender'].to('cuda').to(torch.float32)
+        w = torch.load(
+            os.path.join(FOLDER, f'w/{id}.pt'),
+        ).to('cuda').to(torch.float32)
+
+        pti_g_path = os.path.join(FOLDER, f'models/sg2/{id}.pt')
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval()
+
+        og = Image.open(os.path.join(FOLDER, 'aligned', f'{id}.png'))
+        og = og.resize((256, 256), Image.LANCZOS)
+
+        grid = []
+        for swapper_name, swapper_cls in SWAPPERS:
+            swapper = swapper_cls()
+            if swapper_name not in ['base', 'cur']:
+                swapper.load_state_dict(torch.load(os.path.join(
+                    FOLDER, f'models/swappers/{swapper_name}/{id}.pt')))
+            swapper.eval()
+            swapper = swapper.to('cuda')
+
+            row = [og]
+            for mag in MAGS:
+                swap_w, _ = swapper(w, gender, magnitude=mag)
+                swap_img_tensor = G(swap_w, noise_mode='const')
+                swap_img = normalized_tensor_to_pil_img(
+                    resize_imgs(swap_img_tensor, 256)[0])
+                row.append(swap_img)
+
+            grid.append(row)
+
+        create_img_grid(grid, 256).save(
+            os.path.join(FOLDER, 'results', f'{id}.png'))
+
+
+def finetune_styleclip_lerper(
+    asi_exp=None,
+    sc_exp=None,
+    convert_to_static=True,
+):
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+        print(id)
+
+        img = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+        gender = batch['gender'].to('cuda').to(torch.float32)
+        w = torch.load(
+            os.path.join(FOLDER, f'w/{id}.pt'),
+        ).to('cuda').to(torch.float32)
+
+        pti_g_path = os.path.join(FOLDER, f'models/sg2/{id}.pt')
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval().to('cuda')
+
+        hparams = [
+            (0.1, 0.8),
+        ]
+
+        n_iter = 1000
+        sample_freq = 250
+        grid = []
+        for exp, (id_weight, delta_weight) in enumerate(hparams):
+            debug_folder = os.path.join(FOLDER, f'debug/sc-lerp')
+            os.makedirs(debug_folder, exist_ok=True)
+            save_folder = os.path.join(FOLDER, f'models/sc-lerp/{exp}')
+            os.makedirs(save_folder, exist_ok=True)
+            save_path = os.path.join(save_folder, f'{id}.pt')
+
+            if asi_exp is not None:
+                lerper, cfg = build_model_from_exp(asi_exp, 'G')
+                lerper = lerper.f
+                text = cfg.loss.clip.target_text
+            elif sc_exp is not None:
+                name, text = sc_exp
+                lerper = StyleClipLerper(name).to('cuda').train()
+            else:
+                raise Exception('.')
+
+            if convert_to_static:
+                lerper = convert_dynamic_lerper_to_static(
+                    lerper, w, gender, type='levels')
+                opt = torch.optim.Adam(lerper.parameters(), lr=0.002)
+            else:
+                opt = Ranger(lerper.parameters(), lr=0.5)
+
+            lerper = lerper.to('cuda').train()
+            loss_fn = SoloStyleClipLoss(text, img, w).to('cuda')
+
+            base = normalized_tensor_to_pil_img(
+                resize_imgs(G(w, noise_mode='const'), 256)[0])
+
+            samples = [base]
+            debug_data = []
+            for i in range(n_iter):
+                opt.zero_grad()
+                new_w = lerper(w, gender, magnitude=1.)
+                new_img = G(new_w, noise_mode='const')
+                loss = loss_fn(new_img, new_w)
+                debug_data.append(loss.item())
+                loss.backward()
+                opt.step()
+
+                if i % sample_freq == 0 or i == n_iter - 1:
+                    samples.append(normalized_tensor_to_pil_img(resize_imgs(
+                        new_img, 256)[0]))
+
+            torch.save(lerper.state_dict(), save_path)
+
+            plt.plot(debug_data)
+            plt.savefig(os.path.join(debug_folder, f'loss_{exp}_{id}.png'))
+            plt.clf()
+
+            grid.append(samples)
+
+        create_img_grid(grid, 256).save(
+            os.path.join(debug_folder, f'grid_{id}.png'))
+
+
+def new_finetune_lerper(lerp_exp, convert_to_static=True):
+    debug_folder = os.path.join(FOLDER, f'debug/new-lerp')
+    save_folder = os.path.join(FOLDER, f'models/new-lerp')
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+        print(id)
+
+        img = batch['img'].to('cuda').to(torch.float32) / 127.5 - 1
+        gender = batch['gender'].to('cuda').to(torch.float32)
+        w = torch.load(
+            os.path.join(FOLDER, f'w/{id}.pt'),
+        ).to('cuda').to(torch.float32)
+
+        pti_g_path = os.path.join(FOLDER, f'models/sg2/{id}.pt')
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval().to('cuda')
+
+        base = normalized_tensor_to_pil_img(
+            resize_imgs(G(w, noise_mode='const'), 256)[0])
+        n_iter = 100
+        sample_freq = 20
+        hparams = [
+            (0.1, 0.8, 1., False),
+            (0.05, 0.8, 1., False),
+            (0.2, 0.8, 1., False),
+            (0.1, 0.4, 1., False),
+            (0.1, 1.6, 1., False),
+            (0.1, 0.8, 0.5, False),
+            (0.1, 0.8, 2., False),
+        ]
+        grid = []
+        for exp, (
+            face_weight,
+            delta_weight,
+            classify_weight,
+            use_l2_for_classify,
+        ) in enumerate(hparams):
+            lerper = build_model_from_exp(
+                lerp_exp, 'G', return_cfg=False).f.to('cuda')
+
+            if convert_to_static:
+                lerper = convert_dynamic_lerper_to_static(
+                    lerper, w, gender, type='levels')
+                opt = torch.optim.Adam(lerper.parameters(), lr=0.002)
+            else:
+                opt = Ranger(lerper.parameters(), lr=0.5)
+
+            lerper = lerper.to('cuda').train()
+            loss_fn = SoloClassifyLerpLoss(
+                img,
+                w,
+                gender,
+                imsize=256,
+                face_weight=face_weight,
+                delta_weight=delta_weight,
+                classify_weight=classify_weight,
+                use_l2_for_classify=use_l2_for_classify,
+            ).to('cuda')
+
+            samples = [base]
+            debug_data = []
+            for i in range(n_iter):
+                opt.zero_grad()
+                new_w = lerper(w, gender, magnitude=1.)
+                new_img = G(new_w, noise_mode='const')
+                new_img = resize_imgs(new_img, 256)
+                loss = loss_fn(new_img, new_w)
+                debug_data.append(loss.item())
+                loss.backward()
+                opt.step()
+
+                if i % sample_freq == 0 or i == n_iter - 1:
+                    samples.append(normalized_tensor_to_pil_img(new_img[0]))
+
+            plt.plot(debug_data)
+            plt.savefig(os.path.join(debug_folder, f'loss_{exp}_{id}.png'))
+            plt.clf()
+
+            create_img_row(samples, 256).save(
+                os.path.join(debug_folder, f'samples_{exp}_{id}.png'))
+
+            progression = []
+            with torch.no_grad():
+                for mag in [0., 0.75, 1., 1.25, 1.5]:
+                    new_w = lerper(w, gender, magnitude=mag)
+                    new_img = G(new_w, noise_mode='const')
+                    new_img = resize_imgs(new_img, 256)
+                    progression.append(normalized_tensor_to_pil_img(new_img[0]))
+            grid.append(progression)
+
+        create_img_grid(grid, 256).save(
+            os.path.join(debug_folder, f'final_{id}.png'))
+
+
+def run_styleclip_lerper(name):
+    lerper = StyleClipLerper(name).to('cuda').eval()
+
+    folder = os.path.join(FOLDER, 'results/styleclip')
+    os.makedirs(folder, exist_ok=True)
+
+    clean_set = get_clean_set()
+    for batch in clean_set:
+        assert len(batch['id']) == 1
+        id = batch['id'][0]
+        print(id)
+
+        gender = batch['gender'].to('cuda').to(torch.float32)
+        w = torch.load(
+            os.path.join(FOLDER, f'w/{id}.pt'),
+        ).to('cuda').to(torch.float32)
+
+        pti_g_path = os.path.join(FOLDER, f'models/sg2/{id}.pt')
+        G = build_pretrained_sg2(path_override=pti_g_path).synthesis
+        G.eval()
+
+        og = Image.open(os.path.join(FOLDER, 'aligned', f'{id}.png'))
+        og = og.resize((256, 256), Image.LANCZOS)
+
+        row = [og]
+        new_w = lerper(w, gender, magnitude=1.)
+        new_img_tensor = G(new_w, noise_mode='const')
+        new_img = normalized_tensor_to_pil_img(
+            resize_imgs(new_img_tensor, 256)[0])
+        row.append(new_img)
+        create_img_row(row, 256).save(os.path.join(folder, f'{name}_{id}.png'))
+
+
+if __name__ == '__main__':
+    # with torch.no_grad():
+        # save_ffhq_clean_to_dir()
+        # rename_models()
+        # copy_modelless_to_tmp_folder()
+        # rename_ws()
+        # compare_swappers()
+        # run_styleclip_lerper('mohawk_hairstyle')
+    # train_age_const_swapper()
+    # train_hair_delta_generators()
+    # train_clip_swapper()
+    # finetune_styleclip_lerper(sc_exp=('long_hair', 'long hair'))
+    # finetune_styleclip_lerper(asi_exp='lerp/0/0')
+    new_finetune_lerper(lerp_exp='lerp/5/5')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# tmp

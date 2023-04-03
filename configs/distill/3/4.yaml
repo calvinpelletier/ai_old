@@ -1,0 +1,41 @@
+info: 'non-adv brew 128x128, adalin g, pixel only'
+task: 'ai_old.task.distill.Sg2DistillTask'
+seed: 0
+fp32: false
+n_steps: 25000000
+# eval_freq: 4000
+
+dataset:
+    type: 'ai_old.dataset.w_plus.BrewDataset'
+    imsize: 128
+    batch_size: 32
+    batch_gpu: 'auto'
+    xflip: false # implemented in trainer
+
+trainer:
+    type: 'ai_old.trainer.brew.BrewTrainer'
+    xflip: false
+
+opt:
+    type: 'adam'
+    hparams: 'auto-sg2'
+    sch: 'flat'
+
+model:
+    teacher:
+        type: 'ai_old.nn.models.facegen.brew.Teacher'
+        lerp_exp: 'lerp/5/5'
+        low_res_exp: 'distill/4/0'
+    G:
+        type: 'ai_old.nn.models.facegen.brew.Brew'
+        nc_base: 32
+        e_n_layers_per_res: [2, 4, 8, 4, 2]
+        g_type: 'simple'
+        mod_type: 'adalin'
+
+loss:
+    type: 'ai_old.loss.brew.NonAdvBrewLoss'
+    G:
+        rec:
+            perceptual_type: null
+            face_enabled: false

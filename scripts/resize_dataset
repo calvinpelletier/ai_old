@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+from PIL import Image
+import os
+
+def run(x, y, size):
+    # for subdir in os.listdir(os.path.join(root, x)):
+    os.makedirs(y, exist_ok=True)
+    for i, filename in enumerate(os.listdir(x)):
+        print(i, filename)
+        fname, extension = filename.split('.')
+        if extension not in ['png', 'jpg']:
+            print('skipping')
+            continue
+        im = Image.open(os.path.join(x, filename))
+        im2 = im.resize((size, size), Image.LANCZOS)
+        # im2 = im
+        im2.save(os.path.join(y, fname + '.png'), 'PNG')
+
+def run2(root, x, y, size):
+    for filename in os.listdir(os.path.join(root, x)):
+        i, tmp = filename.split('_')
+        print(i)
+        gender = tmp.split('.')[0]
+        im = Image.open(os.path.join(root, x, filename))
+        im2 = im.resize((size, size), Image.LANCZOS)
+        if gender == 'm':
+            subdir = 'A'
+        elif gender == 'f':
+            subdir = 'B'
+        else:
+            raise Exception('wat')
+        if int(i) % 100:
+            testtrain = 'train'
+        else:
+            testtrain = 'test'
+        path = os.path.join(root, y, '{}_{}'.format(testtrain, subdir))
+        # os.makedirs(path)
+        im2.save(os.path.join(path, '{}.png'.format(i)), 'PNG')
+
+
+if __name__ == '__main__':
+    # run('/home/calvin/datasets', 'mtf1-512', 'mtf1-256', 256)
+    # run('/home/calvin/datasets', 'mtf1-256', 'mtf1-128', 128)
+    # run('/home/calvin/datasets', 'mtf1-128', 'mtf1-64', 64)
+    # run2('/home/calvin/datasets', 'gender-paired', 'mtf256', 256)
+    # run('/home/calvin/datasets', 'mtf256', 'mtf128', 128)
+    # run('/home/calvin/datasets', 'mtf-gen-128', 'mtf-gen-64', 64)
+    # run('/home/calvin/storage/sg2/imgs', '/home/calvin/datasets/sg2-256', 256)
+    # run('/home/calvin/datasets/delta-g-256/x', '/home/calvin/datasets/delta-g-64/x', 64)
+    # run('/home/calvin/datasets/ffhq/train_images', '/home/calvin/datasets/ffhq-512/x', 512)
+    # run('/home/calvin/datasets/ffhq/val_images', '/home/calvin/datasets/ffhq-512/x', 512)
+    # run('/home/calvin/datasets/itw-256/x', '/home/calvin/datasets/itw-128/x', 128)
+    # run('/home/calvin/datasets/delta-g-256/x', '/home/calvin/datasets/delta-g-128/x', 128)
+    # run('/home/calvin/datasets/ffhq-1024/x', '/home/calvin/datasets/ffhq-256/x', 256)

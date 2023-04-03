@@ -1,0 +1,16 @@
+name: 'face segmenter'
+
+dataset:
+    type: 'rgb'
+    name: 'seg'
+    res: 512
+
+model:
+    type: 'seg'
+    seg:
+        type: 'ai_old.models.seg.unet.FaceSegmenter'
+        n_classes: 19
+        path: 'seg/face.pth'
+
+inf:
+    batch_size: 32

@@ -1,0 +1,39 @@
+info: 'test real and swap, weaker id, stonger pixel, deeper model'
+task: 'ai_old.task.ult.UltTask'
+
+dataset:
+    type: 'ai_old.dataset.ult.UltDataset'
+    batch_size: 16
+
+trainer:
+    type: 'ai_old.trainer.ult.NonGanUltTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.ult.UltModel'
+    real_enabled: true
+    gan_enabled: false
+    swap_enabled: true
+    z_dims: 256
+    nc_base: 32
+    nc_max: 256
+    f_n_layers: 4
+
+loss:
+    type: 'ai_old.loss.ult.UltLoss'
+    rec_pixel:
+        weight: 5
+    gender:
+        weight: 1
+    dz:
+        weight: 1
+    identity:
+        weight: 0.1
+    swap_pixel:
+        weight: 10

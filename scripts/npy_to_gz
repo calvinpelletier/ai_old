@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+import numpy as np
+
+path = '/home/calvin/data/asi/delta-z/mtf/2.{}'
+x = np.load(path.format('npy'))
+# assert (x[0] == x[1]).all()
+# assert (x[0] == x[2]).all()
+# assert (x[0] == x[3]).all()
+# assert (x[0] == x[4]).all()
+# assert (x[0] == x[5]).all()
+# assert (x[0] == x[6]).all()
+# assert (x[0] == x[7]).all()
+x = -x[0]
+# x = x[0]
+np.savetxt(path.format('gz'), x)

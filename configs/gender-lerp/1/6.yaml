@@ -1,0 +1,31 @@
+info: 'dynamic gender lerp that prevents attribute drift'
+task: 'ai_old.task.synthswap.lerp.SynthSwapTask'
+
+dataset:
+    type: 'ai_old.dataset.synthswap.lerp.GenderLerpDataset'
+    batch_size: 32
+    split: 0.99
+
+trainer:
+    type: 'ai_old.trainer.synthswap.lerp.DynamicGenderLerpTrainer'
+    n_epochs: 60
+
+opt:
+    type: 'ranger'
+    lr: 0.001
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.synthswap.lerp.DynamicMagStaticDirGenderLerper'
+    adj_age: true
+
+loss:
+    type: 'ai_old.loss.synthswap.lerp.DynamicGenderLerpLoss'
+    mag:
+        weight: .001
+    mouth:
+        weight: .0001
+    glasses:
+        weight: 1
+    age:
+        weight: .1

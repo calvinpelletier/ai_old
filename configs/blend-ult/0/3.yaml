@@ -1,0 +1,44 @@
+info: 'large model'
+task: 'ai_old.task.ult.BlendUltTask'
+
+dataset:
+    type: 'ai_old.dataset.ult.BlendUltDataset'
+    batch_size: 32
+
+trainer:
+    type: 'ai_old.trainer.ult.NonGanBlendUltTrainer'
+    n_epochs: 800
+    model_ema: False
+
+opt:
+    type: 'adam'
+    lr: 0.0002
+    sch: 'flat_cosine'
+
+model:
+    type: 'ai_old.nn.models.encgen.ult.BlendUltModel'
+    real_enabled: true
+    gan_enabled: false
+    swap_enabled: true
+    z_dims: 512
+    nc_base: 32
+    nc_max: 512
+    f_n_layers: 1
+    g_k_blend: 1
+
+loss:
+    type: 'ai_old.loss.ult.UltLoss'
+    real_rec_perceptual:
+        weight: 10
+    real_rec_face:
+        weight: 1
+    real_rec_pixel:
+        weight: 10
+    gender:
+        weight: 1
+    dz_mtf:
+        weight: 1
+    dz_ftm:
+        weight: 1
+    identity:
+        weight: 0.1

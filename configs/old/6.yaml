@@ -1,0 +1,40 @@
+name: 'z-mtf'
+
+dataset:
+    type: 'delta-z'
+    name: 'z-mtf'
+    dims_in: 512
+    dims_out: 1
+    split: 0.99
+
+model:
+    type: 'transform-classify'
+    t:
+        type: 'ai_old.models.t.linear.LinearTransformer'
+        dims: 512
+    c:
+        type: 'ai_old.models.c.mlp.MlpClassifier'
+        hidden: [64]
+        exp: 4
+
+train:
+    epochs: 4
+    batch_size: 2
+    loss:
+        pred:
+            weight: 0.001
+        change:
+            weight: 0.1
+        dir:
+            target: 'delta-z/mtf/vector.gz'
+            weight: 0.9
+        mag:
+            target: 'delta-z/mtf/vector.gz'
+            weight: 0.1
+    opt:
+        lr: 0.00002
+        step_size: 1
+        gamma: 0.1
+
+inf:
+    batch_size: 256

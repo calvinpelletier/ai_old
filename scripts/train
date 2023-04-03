@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+import os
+import json
+import tempfile
+import torch
+import argparse
+import shutil
+from asi import custom_ops
+from ai_old.trainer.loop import training_loop
+from ai_old.util import config
+from external.sg2 import training_stats
+from external.sg2.util import Logger
+from ai_old.util.etc import AttrDict
+import ai_old.constants as c
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='asi trainer')
+    parser.add_argument('--cfg', type=str, required=True,
+                        help='path rel to configs folder')
+    parser.add_argument('--resume', action='store_true',
+                        help='continue from latest save')
+    parser.add_argument('--num_gpus', type=int, default=1,
+                        help='number of gpus')
+    parser.add_argument('--skip_prompt', action='store_true',
+                        help='skip any run prompts')
+    return parser.parse_args()
+
+
+def setup_training_config(cfg, num_gpus, resume, run_dir):
+    # defaults
+    if not hasattr(cfg, 'maintenance_freq'):
+        cfg.maintenance_freq = 4000
+    if not hasattr(cfg, 'eval_freq'):
+        cfg.eval_freq = 200000
+
+    # validation
+    assert isinstance(num_gpus, int)
+    if not (num_gpus >= 1 and num_gpus & (num_gpus - 1) == 0):
+        raise Exception('--num_gpus must be a power of two')
+
+    # transfer from args to cfg
+    cfg.num_gpus = num_gpus
+    cfg.resume = resume
+    cfg.run_dir = run_dir
+
+    # paths
+    cfg.saves_dir = os.path.join(cfg.run_dir, 'saves')
+    os.makedirs(cfg.saves_dir, exist_ok=True)
+    cfg.logs_dir = os.path.join(cfg.run_dir, 'logs')
+    os.makedirs(cfg.logs_dir, exist_ok=True)
+
+    # calculate batch size per gpu
+    if cfg.dataset.batch_size == 'auto':
+        cfg.dataset.batch_size = max(
+            min(cfg.num_gpus * min(4096 // cfg.dataset.imsize, 32), 64),
+            cfg.num_gpus,
+        )
+    if cfg.dataset.batch_gpu == 'auto':
+        cfg.dataset.batch_gpu = cfg.dataset.batch_size // cfg.num_gpus
+
+
+def subprocess_fn(rank, cfg, temp_dir):
+    Logger(
+        file_name=os.path.join(cfg.run_dir, 'log.txt'),
+        file_mode='a',
+        should_flush=True,
+    )
+
+    if cfg.num_gpus > 1:
+        init_file = os.path.abspath(os.path.join(
+            temp_dir,
+            '.torch_distributed_init',
+        ))
+        if os.name == 'nt':
+            init_method = 'file:///' + init_file.replace('\\', '/')
+            torch.distributed.init_process_group(
+                backend='gloo',
+                init_method=init_method,
+                rank=rank,
+                world_size=cfg.num_gpus,
+            )
+        else:
+            init_method = f'file://{init_file}'
+            torch.distributed.init_process_group(
+                backend='nccl',
+                init_method=init_method,
+                rank=rank,
+                world_size=cfg.num_gpus,
+            )
+
+    sync_device = torch.device('cuda', rank) if cfg.num_gpus > 1 else None
+
+    training_stats.init_multiprocessing(rank=rank, sync_device=sync_device)
+
+    if rank != 0:
+        custom_ops.verbosity = 'none'
+
+    training_loop(rank=rank, cfg=cfg)
+
+
+def run(args):
+    config_path = os.path.join(c.CONFIGS_FOLDER, 'train', args.cfg)
+    if not config_path.endswith('.yaml'):
+        config_path += '.yaml'
+
+    run_dir = os.path.join(c.EXP_PATH, args.cfg.split('.')[0])
+
+    print('[INFO] config path: ' + config_path)
+    print('[INFO] results path: ' + run_dir)
+
+    # init results folder
+    if os.path.exists(run_dir) and not args.resume:
+        print('[WARNING] run dir exists but --resume flag not set')
+        if not args.skip_prompt:
+            _ = input('press enter to delete folder or ctrl-c to cancel... ')
+        shutil.rmtree(run_dir)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # build conf
+    cfg = config.load(config_path)
+    print('[INFO] loaded config {}: {}'.format(args.cfg, cfg.info))
+
+    # fill in missing values and replace auto values
+    setup_training_config(cfg, args.num_gpus, args.resume, run_dir)
+
+    # launch processes
+    print('[INFO] launching processes...')
+    torch.multiprocessing.set_start_method('spawn')
+    with tempfile.TemporaryDirectory() as temp_dir:
+        if cfg.num_gpus == 1:
+            subprocess_fn(rank=0, cfg=cfg, temp_dir=temp_dir)
+        else:
+            torch.multiprocessing.spawn(
+                fn=subprocess_fn,
+                args=(cfg, temp_dir),
+                nprocs=cfg.num_gpus,
+            )
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    run(args)

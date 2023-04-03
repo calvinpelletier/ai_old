@@ -1,0 +1,88 @@
+name: 'learn dynamic lerp through latent space'
+trainer: 'ai_old.trainers.pairedgender.PairedGenderTrainer'
+
+deps:
+    facegen:
+        path: 'stylegan/stylegan2-ffhq-config-f.pt'
+        frozen: True
+        strict: False
+    gender:
+        exp: 'gender/0/base'
+        type: 'ai_old.models.c.transfer.TransferMlpClassifier'
+        key: 'c'
+        frozen: True
+    age:
+        exp: 'age/0/base'
+        type: 'ai_old.models.c.transfer.TransferMlpClassifier'
+        key: 'c'
+        frozen: True
+    seg:
+        path: 'deeplab/deeplab_model.pth'
+        frozen: True
+    facerecog_loss:
+        path: 'arcface/model_ir_se50.pth'
+        frozen: True
+        strict: False
+
+dataset:
+    type: 'gaussian'
+    n: 10000
+    dims: 512
+
+model:
+    g:
+        type: 'dep'
+        dep: 'facegen'
+        truncation: 0.7
+    gender:
+        type: 'dep'
+        dep: 'gender'
+    age:
+        type: 'dep'
+        dep: 'age'
+    t:
+        type: 'ai_old.models.t.lerp.DynamicLerpTransformer'
+        base_lerp: 'mtf/0.gz'
+        hidden: [512, 512, 512, 512, 512]
+        norm: 'batch'
+        weight_norm: True
+        activation: 'lrelu'
+    seg:
+        type: 'dep'
+        dep: 'seg'
+
+train:
+    loss:
+        scaled_age_diff:
+            min: 0.
+            max: 3.
+            weight: 10.
+        gender:
+            min: 0.
+            max: 0.03
+            weight: 1.
+        mouth:
+            min: 0.
+            max: 40.
+            weight: 1.
+        glasses:
+            min: 0.
+            max: 300.
+            weight: 1.
+        face_percep:
+            min: 0.7
+            max: 0.9
+            weight: 1.
+        face_recog:
+            min: 0.5
+            max: 0.7
+            weight: 1.
+        deviation:
+            min: 0.
+            max: 0.1
+            weight: 1.
+    epochs: 10
+    batch_size: 32
+    opt:
+        type: 'ranger'
+        lr: 0.01
